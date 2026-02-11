@@ -1,0 +1,18 @@
+# Face Verification Configuration
+
+primary_backend: deepface
+
+deepface:
+  model: Facenet512
+  detector: retinaface
+  distance_metric: cosine
+  threshold: 0.4
+
+insightface:
+  model: buffalo_l
+  threshold: 0.4
+
+ensemble:
+  enabled: false
+  backends: [deepface, insightface]
+  threshold: 0.7

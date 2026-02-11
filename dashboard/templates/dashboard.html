@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>QuickChat ID - KYC Dashboard</title>
+
+    <!-- Bootstrap CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+
+    <!-- Bootstrap Icons -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
+
+    <style>
+        body {
+            background-color: #f8f9fa;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        .navbar {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }
+
+        .stat-card {
+            border-radius: 10px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            transition: transform 0.2s;
+        }
+
+        .stat-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+        }
+
+        .status-badge {
+            padding: 5px 10px;
+            border-radius: 20px;
+            font-size: 0.85rem;
+            font-weight: 500;
+        }
+
+        .status-approved {
+            background-color: #d4edda;
+            color: #155724;
+        }
+
+        .status-pending {
+            background-color: #fff3cd;
+            color: #856404;
+        }
+
+        .status-rejected {
+            background-color: #f8d7da;
+            color: #721c24;
+        }
+
+        .status-failed {
+            background-color: #e2e3e5;
+            color: #383d41;
+        }
+
+        .table-responsive {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        .search-box {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        .image-preview {
+            max-width: 100px;
+            max-height: 100px;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+        }
+
+        .modal-image {
+            max-width: 100%;
+            height: auto;
+        }
+    </style>
+</head>
+<body>
+    <!-- Navbar -->
+    <nav class="navbar navbar-dark">
+        <div class="container-fluid">
+            <span class="navbar-brand mb-0 h1">
+                <i class="bi bi-shield-check"></i> QuickChat ID - KYC Dashboard
+            </span>
+            <span class="text-white">
+                <i class="bi bi-clock"></i> <span id="current-time"></span>
+            </span>
+        </div>
+    </nav>
+
+    <div class="container-fluid mt-4">
+        <!-- Statistics Cards -->
+        <div class="row mb-4">
+            <div class="col-md-3">
+                <div class="card stat-card border-0">
+                    <div class="card-body">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <div>
+                                <h6 class="text-muted mb-1">ทั้งหมด</h6>
+                                <h2 class="mb-0" id="stat-total">0</h2>
+                            </div>
+                            <div class="text-primary" style="font-size: 3rem;">
+                                <i class="bi bi-file-earmark-text"></i>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-md-3">
+                <div class="card stat-card border-0">
+                    <div class="card-body">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <div>
+                                <h6 class="text-muted mb-1">ผ่านการตรวจสอบ</h6>
+                                <h2 class="mb-0 text-success" id="stat-approved">0</h2>
+                            </div>
+                            <div class="text-success" style="font-size: 3rem;">
+                                <i class="bi bi-check-circle"></i>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-md-3">
+                <div class="card stat-card border-0">
+                    <div class="card-body">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <div>
+                                <h6 class="text-muted mb-1">รอการตรวจสอบ</h6>
+                                <h2 class="mb-0 text-warning" id="stat-pending">0</h2>
+                            </div>
+                            <div class="text-warning" style="font-size: 3rem;">
+                                <i class="bi bi-hourglass-split"></i>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-md-3">
+                <div class="card stat-card border-0">
+                    <div class="card-body">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <div>
+                                <h6 class="text-muted mb-1">ไม่ผ่าน</h6>
+                                <h2 class="mb-0 text-danger" id="stat-rejected">0</h2>
+                            </div>
+                            <div class="text-danger" style="font-size: 3rem;">
+                                <i class="bi bi-x-circle"></i>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Search Box -->
+        <div class="search-box">
+            <div class="row">
+                <div class="col-md-4">
+                    <label for="search-name" class="form-label">ค้นหาด้วยชื่อ</label>
+                    <input type="text" class="form-control" id="search-name" placeholder="ชื่อ หรือ นามสกุล">
+                </div>
+                <div class="col-md-4">
+                    <label for="search-id" class="form-label">ค้นหาด้วยเลขบัตรประชาชน</label>
+                    <input type="text" class="form-control" id="search-id" placeholder="เลขบัตรประชาชน 13 หลัก">
+                </div>
+                <div class="col-md-2">
+                    <label for="filter-status" class="form-label">สถานะ</label>
+                    <select class="form-select" id="filter-status">
+                        <option value="">ทั้งหมด</option>
+                        <option value="approved">ผ่าน</option>
+                        <option value="pending">รอตรวจสอบ</option>
+                        <option value="rejected">ไม่ผ่าน</option>
+                        <option value="failed">ล้มเหลว</option>
+                    </select>
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label">&nbsp;</label>
+                    <button class="btn btn-primary w-100" onclick="loadVerifications()">
+                        <i class="bi bi-search"></i> ค้นหา
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Verification Records Table -->
+        <div class="table-responsive">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h5><i class="bi bi-list-ul"></i> รายการตรวจสอบตัวตน</h5>
+                <button class="btn btn-outline-primary btn-sm" onclick="loadVerifications()">
+                    <i class="bi bi-arrow-clockwise"></i> รีเฟรช
+                </button>
+            </div>
+
+            <div id="loading" class="loading">
+                <div class="spinner-border text-primary" role="status">
+                    <span class="visually-hidden">Loading...</span>
+                </div>
+                <p class="mt-2 text-muted">กำลังโหลดข้อมูล...</p>
+            </div>
+
+            <table class="table table-hover" id="verifications-table" style="display: none;">
+                <thead class="table-light">
+                    <tr>
+                        <th>ID</th>
+                        <th>วันที่/เวลา</th>
+                        <th>ชื่อ-นามสกุล</th>
+                        <th>เลขบัตร</th>
+                        <th>ความคล้าย</th>
+                        <th>สถานะ</th>
+                        <th>รูปภาพ</th>
+                        <th>จัดการ</th>
+                    </tr>
+                </thead>
+                <tbody id="verifications-tbody">
+                    <!-- Data will be loaded here -->
+                </tbody>
+            </table>
+
+            <div id="no-data" style="display: none;" class="text-center py-5 text-muted">
+                <i class="bi bi-inbox" style="font-size: 3rem;"></i>
+                <p class="mt-3">ไม่พบข้อมูล</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Detail Modal -->
+    <div class="modal fade" id="detailModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">รายละเอียดการตรวจสอบ</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body" id="modal-body">
+                    <!-- Details will be loaded here -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Image Modal -->
+    <div class="modal fade" id="imageModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="imageModalLabel">รูปภาพ</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body text-center">
+                    <img id="modal-image" class="modal-image" src="" alt="Image">
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Bootstrap JS -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+
+    <script>
+        // Update current time
+        function updateTime() {
+            const now = new Date();
+            document.getElementById('current-time').textContent = now.toLocaleString('th-TH');
+        }
+        setInterval(updateTime, 1000);
+        updateTime();
+
+        // Load statistics
+        async function loadStatistics() {
+            try {
+                const response = await fetch('/api/statistics');
+                const stats = await response.json();
+
+                document.getElementById('stat-total').textContent = stats.total;
+                document.getElementById('stat-approved').textContent = stats.approved;
+                document.getElementById('stat-pending').textContent = stats.pending;
+                document.getElementById('stat-rejected').textContent = stats.rejected;
+            } catch (error) {
+                console.error('Error loading statistics:', error);
+            }
+        }
+
+        // Load verification records
+        async function loadVerifications() {
+            console.log('Loading verifications...');
+            document.getElementById('loading').style.display = 'block';
+            document.getElementById('verifications-table').style.display = 'none';
+            document.getElementById('no-data').style.display = 'none';
+
+            try {
+                const status = document.getElementById('filter-status').value;
+                const searchName = document.getElementById('search-name').value.trim();
+                const searchId = document.getElementById('search-id').value.trim();
+
+                let url = '/api/verifications';
+
+                // Search by ID number
+                if (searchId) {
+                    url = `/api/search/id_number/${searchId}`;
+                    console.log('Searching by ID:', searchId);
+                    const response = await fetch(url);
+                    if (response.ok) {
+                        const record = await response.json();
+                        displayVerifications([record]);
+                    } else {
+                        console.log('ID not found');
+                        displayVerifications([]);
+                    }
+                    return;
+                }
+
+                // Search by name
+                if (searchName) {
+                    url = `/api/search/name?name=${encodeURIComponent(searchName)}`;
+                    console.log('Searching by name:', searchName);
+                }
+                // Filter by status
+                else if (status) {
+                    url = `/api/verifications?status=${status}`;
+                    console.log('Filtering by status:', status);
+                }
+
+                console.log('Fetching from:', url);
+                const response = await fetch(url);
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const records = await response.json();
+                console.log('Loaded records:', records.length);
+
+                displayVerifications(records);
+            } catch (error) {
+                console.error('Error loading verifications:', error);
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('no-data').style.display = 'block';
+            }
+        }
+
+        // Display verification records
+        function displayVerifications(records) {
+            console.log('Displaying verifications:', records.length, 'records');
+            const tbody = document.getElementById('verifications-tbody');
+            tbody.innerHTML = '';
+
+            document.getElementById('loading').style.display = 'none';
+
+            if (records.length === 0) {
+                console.log('No records to display');
+                document.getElementById('no-data').style.display = 'block';
+                return;
+            }
+
+            document.getElementById('verifications-table').style.display = 'table';
+            console.log('Table should be visible now');
+
+            records.forEach(record => {
+                const row = document.createElement('tr');
+
+                const fullName = `${record.prefix || ''} ${record.first_name || ''} ${record.last_name || ''}`.trim() || '-';
+                const statusClass = `status-${record.status}`;
+                const statusText = {
+                    'approved': 'ผ่าน',
+                    'pending': 'รอตรวจสอบ',
+                    'rejected': 'ไม่ผ่าน',
+                    'failed': 'ล้มเหลว'
+                }[record.status] || record.status;
+
+                const similarity = record.face_similarity_score
+                    ? `${record.face_similarity_score.toFixed(1)}%`
+                    : '-';
+
+                const createdDate = new Date(record.created_at).toLocaleString('th-TH');
+
+                row.innerHTML = `
+                    <td>${record.id}</td>
+                    <td>${createdDate}</td>
+                    <td>${fullName}</td>
+                    <td>${record.id_number || '-'}</td>
+                    <td>${similarity}</td>
+                    <td><span class="status-badge ${statusClass}">${statusText}</span></td>
+                    <td>
+                        ${record.id_card_s3_url ? `<img src="${record.id_card_s3_url}" class="image-preview" onclick="showImage('${record.id_card_s3_url}', 'บัตรประชาชน')" alt="ID Card">` : '-'}
+                        ${record.selfie_s3_url ? `<img src="${record.selfie_s3_url}" class="image-preview" onclick="showImage('${record.selfie_s3_url}', 'Selfie')" alt="Selfie">` : ''}
+                    </td>
+                    <td>
+                        <button class="btn btn-sm btn-outline-primary" onclick="showDetails(${record.id})">
+                            <i class="bi bi-eye"></i>
+                        </button>
+                        <button class="btn btn-sm btn-outline-danger" onclick="deleteRecord(${record.id})">
+                            <i class="bi bi-trash"></i>
+                        </button>
+                    </td>
+                `;
+
+                tbody.appendChild(row);
+            });
+        }
+
+        // Show image in modal
+        function showImage(url, title) {
+            document.getElementById('imageModalLabel').textContent = title;
+            document.getElementById('modal-image').src = url;
+            new bootstrap.Modal(document.getElementById('imageModal')).show();
+        }
+
+        // Show record details
+        async function showDetails(recordId) {
+            try {
+                const response = await fetch(`/api/verifications/${recordId}`);
+                const record = await response.json();
+
+                const fullName = `${record.prefix || ''} ${record.first_name || ''} ${record.last_name || ''}`.trim();
+
+                const modalBody = document.getElementById('modal-body');
+                modalBody.innerHTML = `
+                    <div class="row">
+                        <div class="col-md-6">
+                            <h6>ข้อมูลส่วนตัว</h6>
+                            <table class="table table-sm">
+                                <tr><th>ชื่อ-นามสกุล:</th><td>${fullName}</td></tr>
+                                <tr><th>เลขบัตรประชาชน:</th><td>${record.id_number || '-'}</td></tr>
+                                <tr><th>วันเกิด:</th><td>${record.date_of_birth || '-'}</td></tr>
+                                <tr><th>ที่อยู่:</th><td>${record.address || '-'}</td></tr>
+                            </table>
+                        </div>
+                        <div class="col-md-6">
+                            <h6>ผลการตรวจสอบ</h6>
+                            <table class="table table-sm">
+                                <tr><th>สถานะ:</th><td>${record.status}</td></tr>
+                                <tr><th>ความคล้าย:</th><td>${record.face_similarity_score ? record.face_similarity_score.toFixed(2) + '%' : '-'}</td></tr>
+                                <tr><th>ความมั่นใจ:</th><td>${record.face_confidence ? record.face_confidence.toFixed(2) + '%' : '-'}</td></tr>
+                                <tr><th>สร้างเมื่อ:</th><td>${new Date(record.created_at).toLocaleString('th-TH')}</td></tr>
+                            </table>
+                        </div>
+                    </div>
+                    ${record.verification_result ? `
+                        <div class="alert alert-info mt-3">
+                            <strong>ผลการตรวจสอบ:</strong><br>
+                            ${record.verification_result}
+                        </div>
+                    ` : ''}
+                    ${record.notes ? `
+                        <div class="alert alert-secondary mt-3">
+                            <strong>หมายเหตุ:</strong><br>
+                            ${record.notes}
+                        </div>
+                    ` : ''}
+                `;
+
+                new bootstrap.Modal(document.getElementById('detailModal')).show();
+            } catch (error) {
+                console.error('Error loading details:', error);
+                alert('ไม่สามารถโหลดรายละเอียดได้');
+            }
+        }
+
+        // Delete record
+        async function deleteRecord(recordId) {
+            if (!confirm('คุณต้องการลบรายการนี้หรือไม่?')) {
+                return;
+            }
+
+            try {
+                const response = await fetch(`/api/verifications/${recordId}`, {
+                    method: 'DELETE'
+                });
+
+                if (response.ok) {
+                    alert('ลบรายการสำเร็จ');
+                    loadVerifications();
+                    loadStatistics();
+                } else {
+                    alert('ไม่สามารถลบรายการได้');
+                }
+            } catch (error) {
+                console.error('Error deleting record:', error);
+                alert('เกิดข้อผิดพลาดในการลบรายการ');
+            }
+        }
+
+        // Initialize dashboard when DOM is ready
+        document.addEventListener('DOMContentLoaded', function() {
+            console.log('Dashboard initializing...');
+            loadStatistics();
+            loadVerifications();
+
+            // Auto-refresh every 30 seconds
+            setInterval(() => {
+                loadStatistics();
+                loadVerifications();
+            }, 30000);
+        });
+    </script>
+</body>
+</html>

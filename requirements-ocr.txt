@@ -1,0 +1,28 @@
+# OCR Libraries for Thai ID Cards
+
+# ==================== PaddleOCR (Recommended) ====================
+# Best for Thai: 82.68% accuracy
+paddlepaddle>=3.0.0  # or paddlepaddle-gpu for GPU
+paddleocr>=2.9.1
+
+# ==================== Tesseract ====================
+# Fast, widely available
+pytesseract>=0.3.10
+# Note: Requires tesseract-ocr system package
+
+# ==================== Image Processing ====================
+opencv-python>=4.10.0.84
+Pillow>=11.0.0
+#numpy>=2.1.3
+numpy<=2.0.2
+scipy>=1.11.0
+
+# ==================== Utilities ====================
+pandas>=2.2.3
+pyyaml>=6.0.1
+typhoon-ocr>=0.3.8
+
+# ==================== Performance (Optional) ====================
+# GPU acceleration
+# paddlepaddle-gpu>=3.0.0
+# onnxruntime-gpu>=1.20.0

@@ -1,0 +1,18 @@
+# Face Verification Libraries
+
+# Core
+deepface>=0.0.91
+tensorflow>=2.15.0
+opencv-python>=4.10.0
+
+# InsightFace
+insightface>=0.7.3
+onnxruntime>=1.20.0
+
+# MediaPipe  
+mediapipe>=0.10.18
+
+# Utils
+numpy>=2.1.3
+pandas>=2.2.3
+pyyaml>=6.0.1

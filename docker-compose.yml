@@ -1,0 +1,111 @@
+version: '3.8'
+
+services:
+  # OPA - Policy Engine
+  opa:
+    image: openpolicyagent/opa:latest
+    container_name: quickchatid-opa
+    ports:
+      - "8181:8181"
+    command:
+      - "run"
+      - "--server"
+      - "--log-level=info"
+    volumes:
+      - ./policies:/policies
+    networks:
+      - quickchatid
+
+  # Keycloak - IAM
+  keycloak:
+    image: quay.io/keycloak/keycloak:latest
+    container_name: quickchatid-keycloak
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: keycloak
+    ports:
+      - "8080:8080"
+    command:
+      - start-dev
+    depends_on:
+      - postgres
+    networks:
+      - quickchatid
+
+  # PostgreSQL - Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: quickchatid-postgres
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: keycloak
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - quickchatid
+
+  # Redis - Caching
+  redis:
+    image: redis:7-alpine
+    container_name: quickchatid-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - quickchatid
+
+  # Jaeger - Distributed Tracing
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: quickchatid-jaeger
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"  # Jaeger UI
+      - "4318:4318"    # OTLP HTTP
+      - "4317:4317"    # OTLP gRPC
+    networks:
+      - quickchatid
+
+  # Prometheus - Metrics
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: quickchatid-prometheus
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - quickchatid
+
+  # Grafana - Dashboards
+  grafana:
+    image: grafana/grafana:latest
+    container_name: quickchatid-grafana
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    ports:
+      - "3001:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    networks:
+      - quickchatid
+
+volumes:
+  postgres_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  quickchatid:
+    driver: bridge

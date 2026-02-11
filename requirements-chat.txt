@@ -1,0 +1,25 @@
+# Chat Platform Integration Requirements
+
+# ====================  Core ====================
+flask>=3.0.0
+gunicorn>=21.2.0
+requests>=2.32.3
+
+# ==================== LINE Bot SDK ====================
+line-bot-sdk>=3.8.0
+
+# ==================== Messenger (no official SDK needed) ====================
+# Uses requests library
+
+# ==================== Image Processing ====================
+Pillow>=11.0.0
+
+# ==================== Redis (for session management) ====================
+redis>=5.2.0
+redis-om>=0.3.2
+
+# ==================== ngrok (for local testing) ====================
+pyngrok>=7.0.0
+
+# ==================== Production ====================
+python-dotenv>=1.0.1
