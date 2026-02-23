@@ -1,7 +1,87 @@
 version: '3.8'
 
 services:
-  # OPA - Policy Engine
+
+  # ─── Application Services ─────────────────────────────────────────────────
+
+  adk:
+    build: .
+    container_name: quickchatid-adk
+    working_dir: /app/agents
+    command: adk web --port 8000 --host 0.0.0.0
+    env_file: .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./agents:/app/agents
+      - ./uploads:/app/uploads
+    networks:
+      - quickchatid
+    restart: unless-stopped
+
+  webhook:
+    build: .
+    container_name: quickchatid-webhook
+    command: python line_webhook_app.py
+    env_file: .env
+    environment:
+      - ADK_SERVER_URL=http://adk:8000
+    ports:
+      - "5001:5001"
+    volumes:
+      - ./uploads:/app/uploads
+      - ./logs:/app/logs
+    depends_on:
+      - adk
+    networks:
+      - quickchatid
+    restart: unless-stopped
+
+  web-api:
+    build: .
+    container_name: quickchatid-web-api
+    command: python web_api_app.py
+    env_file: .env
+    environment:
+      - ADK_SERVER_URL=http://adk:8000
+      - PORT=5003
+    ports:
+      - "5003:5003"
+    volumes:
+      - ./uploads:/app/uploads
+      - ./logs:/app/logs
+    depends_on:
+      - adk
+    networks:
+      - quickchatid
+    restart: unless-stopped
+
+  dashboard:
+    build: .
+    container_name: quickchatid-dashboard
+    command: python dashboard_app.py
+    env_file: .env
+    ports:
+      - "5002:5002"
+    volumes:
+      - ./uploads:/app/uploads
+    networks:
+      - quickchatid
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    container_name: quickchatid-frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - web-api
+    networks:
+      - quickchatid
+    restart: unless-stopped
+
+  # ─── Infrastructure Services ───────────────────────────────────────────────
+
   opa:
     image: openpolicyagent/opa:latest
     container_name: quickchatid-opa
@@ -15,43 +95,23 @@ services:
       - ./policies:/policies
     networks:
       - quickchatid
+    restart: unless-stopped
 
-  # Keycloak - IAM
-  keycloak:
-    image: quay.io/keycloak/keycloak:latest
-    container_name: quickchatid-keycloak
-    environment:
-      KEYCLOAK_ADMIN: admin
-      KEYCLOAK_ADMIN_PASSWORD: admin
-      KC_DB: postgres
-      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
-      KC_DB_USERNAME: keycloak
-      KC_DB_PASSWORD: keycloak
-    ports:
-      - "8080:8080"
-    command:
-      - start-dev
-    depends_on:
-      - postgres
-    networks:
-      - quickchatid
-
-  # PostgreSQL - Database
   postgres:
     image: postgres:16-alpine
     container_name: quickchatid-postgres
     environment:
-      POSTGRES_DB: keycloak
-      POSTGRES_USER: keycloak
-      POSTGRES_PASSWORD: keycloak
+      POSTGRES_DB: quickchatid
+      POSTGRES_USER: quickchatid
+      POSTGRES_PASSWORD: quickchatid
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
       - "5432:5432"
     networks:
       - quickchatid
+    restart: unless-stopped
 
-  # Redis - Caching
   redis:
     image: redis:7-alpine
     container_name: quickchatid-redis
@@ -61,50 +121,11 @@ services:
       - redis_data:/data
     networks:
       - quickchatid
-
-  # Jaeger - Distributed Tracing
-  jaeger:
-    image: jaegertracing/all-in-one:latest
-    container_name: quickchatid-jaeger
-    environment:
-      COLLECTOR_OTLP_ENABLED: "true"
-    ports:
-      - "16686:16686"  # Jaeger UI
-      - "4318:4318"    # OTLP HTTP
-      - "4317:4317"    # OTLP gRPC
-    networks:
-      - quickchatid
-
-  # Prometheus - Metrics
-  prometheus:
-    image: prom/prometheus:latest
-    container_name: quickchatid-prometheus
-    volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml
-      - prometheus_data:/prometheus
-    ports:
-      - "9090:9090"
-    networks:
-      - quickchatid
-
-  # Grafana - Dashboards
-  grafana:
-    image: grafana/grafana:latest
-    container_name: quickchatid-grafana
-    environment:
-      GF_SECURITY_ADMIN_PASSWORD: admin
-    ports:
-      - "3001:3000"
-    volumes:
-      - grafana_data:/var/lib/grafana
-    networks:
-      - quickchatid
+    restart: unless-stopped
 
 volumes:
   postgres_data:
   redis_data:
-  prometheus_data:
-  grafana_data:
 
 networks:
   quickchatid:

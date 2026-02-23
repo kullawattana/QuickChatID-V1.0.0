@@ -13,6 +13,7 @@ from database import KYCRepository, init_db
 app = Flask(__name__,
             template_folder='dashboard/templates',
             static_folder='dashboard/static')
+app.json.ensure_ascii = False
 
 # Initialize database
 init_db()

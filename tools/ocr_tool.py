@@ -139,21 +139,22 @@ def extract_thai_id(
         }
     
     except Exception as e:
+        import traceback
         print(f"Thai ID extraction error: {e}")
-        # Fallback to mock
+        traceback.print_exc()
         return {
-            'id_number': '1234567890123',
-            'id_valid': True,
-            'name_th': 'นายสมชาย ใจดี',
-            'name_en': 'Mr. Somchai Jaidee',
-            'date_of_birth': '01 ม.ค. 2533',
-            'address': 'กรุงเทพมหานคร',
-            'issue_date': '01 ม.ค. 2563',
-            'expiry_date': '01 ม.ค. 2573',
-            'confidence_score': 0.85,
-            'success': True,
-            'backend': 'mock',
-            'message': "Mock OCR (Install PaddleOCR for real extraction)"
+            'id_number': '',
+            'id_valid': False,
+            'name_th': '',
+            'name_en': '',
+            'date_of_birth': '',
+            'address': '',
+            'issue_date': '',
+            'expiry_date': '',
+            'confidence_score': 0.0,
+            'success': False,
+            'backend': 'error',
+            'message': f"OCR extraction failed: {str(e)}"
         }
 
 

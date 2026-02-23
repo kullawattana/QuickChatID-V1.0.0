@@ -10,9 +10,15 @@ from typing import Dict, Optional
 import os
 import sys
 import uuid
-from datetime import datetime
+import time
+import hashlib
+import hmac
+import threading
+from datetime import datetime, timedelta
+from functools import wraps
 import tempfile
 from pathlib import Path
+import requests as http_requests
 
 # Add project root to path for imports
 project_root = Path(__file__).parent
@@ -36,6 +42,7 @@ guardrails = get_guardrails_service()
 keycloak = get_keycloak_service()
 
 app = Flask(__name__)
+app.json.ensure_ascii = False
 
 # Enable CORS for frontend (React dev server and production)
 CORS(app, resources={
@@ -52,6 +59,73 @@ CORS(app, resources={
 
 # Session storage (use Redis/Database in production)
 sessions = {}
+
+# ─── E-Commerce API Integration ──────────────────────────────────────────────
+# API Keys: comma-separated list in env, e.g. "key1,key2,key3"
+_raw_keys = os.getenv('ECOMMERCE_API_KEYS', '')
+ECOMMERCE_API_KEYS = set(k.strip() for k in _raw_keys.split(',') if k.strip())
+
+# Webhook registry: { api_key: { url, secret, events } }
+_webhook_registry: Dict[str, dict] = {}
+_webhook_lock = threading.Lock()
+
+# Rate limiter: { ip: [(timestamp), ...] }
+_rate_buckets: Dict[str, list] = {}
+RATE_LIMIT = int(os.getenv('API_RATE_LIMIT', '60'))   # requests per window
+RATE_WINDOW = int(os.getenv('API_RATE_WINDOW', '60'))  # seconds
+
+
+def _require_api_key(f):
+    """Decorator: enforce X-API-Key header for e-commerce endpoints."""
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        if not ECOMMERCE_API_KEYS:
+            return jsonify({'error': 'API access not configured. Set ECOMMERCE_API_KEYS in .env'}), 503
+        key = request.headers.get('X-API-Key', '')
+        if key not in ECOMMERCE_API_KEYS:
+            return jsonify({'error': 'Invalid or missing X-API-Key'}), 401
+        return f(*args, **kwargs)
+    return wrapper
+
+
+def _rate_limit(f):
+    """Decorator: simple sliding-window rate limiter per IP."""
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        ip = request.remote_addr or 'unknown'
+        now = time.time()
+        with threading.Lock():
+            bucket = _rate_buckets.get(ip, [])
+            bucket = [t for t in bucket if now - t < RATE_WINDOW]
+            if len(bucket) >= RATE_LIMIT:
+                return jsonify({'error': 'Rate limit exceeded', 'retry_after': RATE_WINDOW}), 429
+            bucket.append(now)
+            _rate_buckets[ip] = bucket
+        return f(*args, **kwargs)
+    return wrapper
+
+
+def _fire_webhook(api_key: str, event: str, payload: dict):
+    """Send webhook callback to registered URL (fire-and-forget thread)."""
+    def _send():
+        with _webhook_lock:
+            cfg = _webhook_registry.get(api_key)
+        if not cfg:
+            return
+        if event not in cfg.get('events', [event]):
+            return
+        body = {'event': event, 'timestamp': datetime.utcnow().isoformat() + 'Z', **payload}
+        headers = {'Content-Type': 'application/json'}
+        secret = cfg.get('secret', '')
+        if secret:
+            sig = hmac.new(secret.encode(), str(body).encode(), hashlib.sha256).hexdigest()
+            headers['X-QuickChatID-Signature'] = f'sha256={sig}'
+        try:
+            http_requests.post(cfg['url'], json=body, headers=headers, timeout=10)
+        except Exception as e:
+            print(f"⚠️  Webhook delivery failed ({cfg['url']}): {e}")
+    threading.Thread(target=_send, daemon=True).start()
+# ─────────────────────────────────────────────────────────────────────────────
 
 print("✅ ADK Agent loaded successfully!")
 print(f"   Agent: {root_agent.name}")
@@ -198,7 +272,7 @@ def handle_chat_message():
             import requests
             import json
 
-            ADK_SERVER_URL = "http://localhost:8000"
+            ADK_SERVER_URL = os.getenv('ADK_SERVER_URL', 'http://localhost:8000')
             user_id = session['user_id']
 
             # Get or create ADK session
@@ -699,6 +773,430 @@ def get_verification_status(session_id):
         'data': session.get('data', {}),
         'is_completed': session['step'] == 'complete'
     })
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SWAGGER / API DOCS
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.route('/swagger.json')
+def swagger_spec():
+    spec = {
+        "openapi": "3.0.0",
+        "info": {
+            "title": "QuickChat ID — E-Commerce API",
+            "version": "1.0.0",
+            "description": "KYC verification API for e-commerce integration"
+        },
+        "servers": [{"url": "http://localhost:5003"}],
+        "components": {
+            "securitySchemes": {
+                "ApiKeyAuth": {"type": "apiKey", "in": "header", "name": "X-API-Key"}
+            }
+        },
+        "security": [{"ApiKeyAuth": []}],
+        "paths": {
+            "/api/health": {
+                "get": {
+                    "tags": ["System"],
+                    "summary": "Health Check",
+                    "security": [],
+                    "responses": {"200": {"description": "Server is healthy"}}
+                }
+            },
+            "/api/v1/kyc/verify": {
+                "get": {
+                    "tags": ["KYC"],
+                    "summary": "ตรวจสอบ KYC Certificate ของ User",
+                    "description": "ค้นหา approved KYC record ล่าสุดของ user แล้วคืน certificate พร้อม trust badge",
+                    "parameters": [
+                        {
+                            "name": "user_id",
+                            "in": "query",
+                            "required": True,
+                            "description": "Platform user ID (LINE: Uxxxxxxx, Messenger: numeric PSID, Web: WEB_xxx)",
+                            "schema": {"type": "string"},
+                            "example": "9340707359288035"
+                        }
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "KYC Certificate",
+                            "content": {"application/json": {"schema": {
+                                "type": "object",
+                                "properties": {
+                                    "verified": {"type": "boolean"},
+                                    "user_id": {"type": "string"},
+                                    "platform": {"type": "string", "enum": ["line", "messenger", "web"]},
+                                    "role": {"type": "string", "enum": ["buyer", "seller"]},
+                                    "certificate": {
+                                        "type": "object",
+                                        "properties": {
+                                            "name": {"type": "string"},
+                                            "id_number": {"type": "string"},
+                                            "trust_level": {"type": "string", "enum": ["bronze", "silver", "gold", "platinum"]},
+                                            "risk_score": {"type": "number"},
+                                            "transaction_limit": {"type": "integer"},
+                                            "role": {"type": "string"},
+                                            "platform": {"type": "string"},
+                                            "issued_at": {"type": "string", "format": "date-time"}
+                                        }
+                                    }
+                                }
+                            }}}
+                        },
+                        "404": {"description": "No approved KYC record found"},
+                        "401": {"description": "Invalid or missing API key"},
+                        "429": {"description": "Rate limit exceeded"}
+                    }
+                }
+            },
+            "/api/v1/kyc/users": {
+                "get": {
+                    "tags": ["KYC"],
+                    "summary": "List ผู้ใช้ที่ผ่าน KYC",
+                    "description": "ดึงรายชื่อ user ที่ผ่านการ approve แล้ว กรองตาม role และ/หรือ platform",
+                    "parameters": [
+                        {
+                            "name": "role",
+                            "in": "query",
+                            "required": False,
+                            "description": "กรองตาม role (ไม่ระบุ = ทุก role)",
+                            "schema": {"type": "string", "enum": ["buyer", "seller"]}
+                        },
+                        {
+                            "name": "platform",
+                            "in": "query",
+                            "required": False,
+                            "description": "กรองตาม platform (ไม่ระบุ = ทุก platform)",
+                            "schema": {"type": "string", "enum": ["line", "messenger", "web"]}
+                        },
+                        {
+                            "name": "limit",
+                            "in": "query",
+                            "required": False,
+                            "description": "จำนวน record สูงสุด (max 500)",
+                            "schema": {"type": "integer", "default": 100, "maximum": 500}
+                        }
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "List of verified users",
+                            "content": {"application/json": {"schema": {
+                                "type": "object",
+                                "properties": {
+                                    "total": {"type": "integer"},
+                                    "role_filter": {"type": "string"},
+                                    "platform_filter": {"type": "string"},
+                                    "users": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "user_id": {"type": "string"},
+                                                "role": {"type": "string"},
+                                                "platform": {"type": "string"},
+                                                "name": {"type": "string"},
+                                                "trust_level": {"type": "string"},
+                                                "risk_score": {"type": "number"},
+                                                "transaction_limit": {"type": "integer"},
+                                                "verified_at": {"type": "string", "format": "date-time"}
+                                            }
+                                        }
+                                    }
+                                }
+                            }}}
+                        },
+                        "401": {"description": "Invalid or missing API key"},
+                        "429": {"description": "Rate limit exceeded"}
+                    }
+                }
+            },
+            "/api/v1/kyc/stats": {
+                "get": {
+                    "tags": ["KYC"],
+                    "summary": "สถิติ KYC ทั้งหมด",
+                    "description": "นับจำนวน record แยกตาม status, role, platform",
+                    "responses": {"200": {"description": "Aggregate statistics"}}
+                }
+            },
+            "/api/v1/kyc/webhook/register": {
+                "post": {
+                    "tags": ["Webhook"],
+                    "summary": "ลงทะเบียน Webhook",
+                    "description": "รับ event notification เมื่อมีการ approve/reject KYC",
+                    "requestBody": {
+                        "content": {"application/json": {"schema": {
+                            "type": "object",
+                            "properties": {
+                                "url": {"type": "string", "description": "HTTPS callback URL"},
+                                "secret": {"type": "string", "description": "HMAC secret for signature verification"},
+                                "events": {
+                                    "type": "array",
+                                    "items": {"type": "string", "enum": ["kyc.approved", "kyc.rejected", "kyc.failed"]},
+                                    "description": "Events to subscribe (empty = all)"
+                                }
+                            },
+                            "required": ["url"]
+                        }}}
+                    },
+                    "responses": {"200": {"description": "Webhook registered successfully"}}
+                }
+            },
+            "/api/v1/kyc/webhook/test": {
+                "post": {
+                    "tags": ["Webhook"],
+                    "summary": "ทดสอบ Webhook",
+                    "description": "ส่ง test event ไปยัง webhook URL ที่ลงทะเบียนไว้",
+                    "responses": {"200": {"description": "Test event sent"}}
+                }
+            }
+        }
+    }
+    return jsonify(spec)
+
+
+@app.route('/docs')
+def swagger_ui():
+    return '''<!DOCTYPE html>
+<html>
+<head>
+  <title>QuickChat ID API Docs</title>
+  <meta charset="utf-8"/>
+  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
+</head>
+<body>
+  <div id="swagger-ui"></div>
+  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+  <script>
+    SwaggerUIBundle({
+      url: "/swagger.json",
+      dom_id: "#swagger-ui",
+      presets: [SwaggerUIBundle.presets.apis, SwaggerUIBundle.SwaggerUIStandalonePreset],
+      layout: "BaseLayout",
+      persistAuthorization: true
+    })
+  </script>
+</body>
+</html>''', 200, {'Content-Type': 'text/html'}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# E-COMMERCE API  (requires X-API-Key header)
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.route('/api/v1/kyc/verify', methods=['GET'])
+@_require_api_key
+@_rate_limit
+def ecommerce_kyc_verify():
+    """
+    Query KYC status for a user.  E-commerce calls this to check if a user
+    has been verified before allowing purchase / account action.
+
+    Query params:
+        user_id   (required)  - Platform user ID
+        platform  (optional)  - 'web' | 'line' | 'messenger'  (default: any)
+
+    Returns a KYC Certificate JSON.
+    """
+    user_id  = request.args.get('user_id', '').strip()
+    platform = request.args.get('platform', '').strip().lower()
+
+    if not user_id:
+        return jsonify({'error': 'user_id is required'}), 400
+
+    try:
+        from database import KYCRepository
+        repo = KYCRepository()
+
+        record = repo.get_approved_by_user_id(user_id)
+        if not record:
+            return jsonify({
+                'verified': False,
+                'user_id': user_id,
+                'message': 'No approved KYC record found'
+            }), 404
+
+        # Build KYC Certificate — prefer dedicated columns, fallback to notes JSON
+        trust_level = record.trust_level or 'bronze'
+        risk_score  = record.risk_score  or 0
+
+        # Fallback: parse from notes JSON if columns are empty
+        if not record.trust_level and record.notes:
+            try:
+                import json as _json
+                notes = _json.loads(record.notes)
+                trust_level = notes.get('trust_level', trust_level)
+                risk_score  = notes.get('risk_score',  risk_score)
+            except Exception:
+                pass
+
+        certificate = {
+            'verified': True,
+            'user_id': user_id,
+            'certificate': {
+                'id': str(record.id),
+                'issued_at': record.created_at.isoformat() if record.created_at else None,
+                'trust_level': trust_level,
+                'risk_score': risk_score,
+                'role': record.role or 'buyer',
+                'name': ' '.join(p for p in [record.prefix, record.first_name, record.last_name] if p) or None,
+                'id_number_hash': hashlib.sha256((record.id_number or '').encode()).hexdigest()[:16] if record.id_number else None,
+                'transaction_limit': {'bronze': 10000, 'silver': 50000, 'gold': 100000, 'platinum': -1}.get(trust_level, 0),
+                'expires_at': (record.created_at + timedelta(days=365)).isoformat() if record.created_at else None
+            }
+        }
+        return jsonify(certificate)
+
+    except Exception as e:
+        print(f"❌ KYC verify error: {e}")
+        return jsonify({'error': 'Internal server error'}), 500
+
+
+@app.route('/api/v1/kyc/webhook/register', methods=['POST'])
+@_require_api_key
+def ecommerce_webhook_register():
+    """
+    Register a webhook URL to receive KYC completion events.
+
+    Body (JSON):
+        url     (required)  - HTTPS URL to POST events to
+        secret  (optional)  - Signing secret for HMAC-SHA256 signature
+        events  (optional)  - List of events to subscribe to
+                              Default: ["kyc.approved", "kyc.rejected"]
+    """
+    api_key = request.headers.get('X-API-Key')
+    data    = request.get_json(silent=True) or {}
+    url     = data.get('url', '').strip()
+    secret  = data.get('secret', '')
+    events  = data.get('events', ['kyc.approved', 'kyc.rejected'])
+
+    if not url:
+        return jsonify({'error': 'url is required'}), 400
+    if not url.startswith('https://') and not url.startswith('http://localhost'):
+        return jsonify({'error': 'url must use HTTPS'}), 400
+
+    with _webhook_lock:
+        _webhook_registry[api_key] = {'url': url, 'secret': secret, 'events': events}
+
+    return jsonify({
+        'registered': True,
+        'url': url,
+        'events': events,
+        'message': 'Webhook registered. Events will be POST-ed to your URL.'
+    })
+
+
+@app.route('/api/v1/kyc/webhook/test', methods=['POST'])
+@_require_api_key
+def ecommerce_webhook_test():
+    """Send a test event to the registered webhook URL."""
+    api_key = request.headers.get('X-API-Key')
+    with _webhook_lock:
+        cfg = _webhook_registry.get(api_key)
+    if not cfg:
+        return jsonify({'error': 'No webhook registered for this API key'}), 404
+
+    _fire_webhook(api_key, 'kyc.test', {
+        'user_id': 'test_user_001',
+        'trust_level': 'gold',
+        'risk_score': 85
+    })
+    return jsonify({'sent': True, 'url': cfg['url']})
+
+
+@app.route('/api/v1/kyc/users', methods=['GET'])
+@_require_api_key
+@_rate_limit
+def ecommerce_kyc_users():
+    """
+    List approved KYC users, optionally filtered by role and/or platform.
+
+    Query params:
+        role      (optional)  - 'buyer' | 'seller'                     (default: all)
+        platform  (optional)  - 'line' | 'messenger' | 'web'           (default: all)
+        limit     (optional)  - max results (default: 100)
+    """
+    role     = request.args.get('role', '').strip().lower() or None
+    platform = request.args.get('platform', '').strip().lower() or None
+    limit    = min(int(request.args.get('limit', 100)), 500)
+
+    try:
+        from database import KYCRepository
+        records = KYCRepository.get_all_records(status='approved', role=role, platform=platform, limit=limit)
+
+        users = []
+        for r in records:
+            notes = {}
+            if r.notes:
+                try:
+                    import json as _json
+                    notes = _json.loads(r.notes)
+                except Exception:
+                    pass
+            trust_level = notes.get('trust_level', 'bronze')
+            users.append({
+                'user_id': r.user_id,
+                'role': r.role or 'buyer',
+                'platform': r.platform or 'line',
+                'name': ' '.join(p for p in [r.prefix, r.first_name, r.last_name] if p) or None,
+                'trust_level': trust_level,
+                'risk_score': notes.get('risk_score', 0),
+                'transaction_limit': {'bronze': 10000, 'silver': 50000, 'gold': 100000, 'platinum': -1}.get(trust_level, 0),
+                'verified_at': r.created_at.isoformat() if r.created_at else None,
+            })
+
+        return jsonify({'total': len(users), 'role_filter': role or 'all',
+                        'platform_filter': platform or 'all', 'users': users})
+
+    except Exception as e:
+        print(f"❌ KYC users error: {e}")
+        return jsonify({'error': 'Internal server error'}), 500
+
+
+@app.route('/api/v1/kyc/stats', methods=['GET'])
+@_require_api_key
+@_rate_limit
+def ecommerce_kyc_stats():
+    """Return aggregate KYC statistics for dashboard/reporting."""
+    try:
+        from database import KYCRepository
+        repo = KYCRepository()
+        all_records = repo.get_all_records()
+
+        from collections import Counter
+        status_counts = Counter(r.status for r in all_records)
+        badge_counts  = {}
+        for r in all_records:
+            if r.status == 'approved' and r.notes:
+                try:
+                    import json as _json
+                    n = _json.loads(r.notes)
+                    lvl = n.get('trust_level', 'bronze')
+                    badge_counts[lvl] = badge_counts.get(lvl, 0) + 1
+                except Exception:
+                    pass
+
+        return jsonify({
+            'total': len(all_records),
+            'by_status': dict(status_counts),
+            'by_trust_level': badge_counts,
+            'approval_rate': round(status_counts.get('approved', 0) / max(len(all_records), 1) * 100, 1)
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# ─── Internal: fire webhook after KYC saved ──────────────────────────────────
+def notify_webhooks_on_kyc_complete(user_id: str, status: str, trust_level: str, risk_score: float):
+    """Called internally when a KYC record is saved/approved."""
+    event = 'kyc.approved' if status == 'approved' else 'kyc.rejected'
+    payload = {'user_id': user_id, 'status': status, 'trust_level': trust_level, 'risk_score': risk_score}
+    with _webhook_lock:
+        keys = list(_webhook_registry.keys())
+    for key in keys:
+        _fire_webhook(key, event, payload)
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 if __name__ == '__main__':

@@ -67,6 +67,16 @@ class KYCVerification(Base):
     # Additional notes
     notes = Column(Text, nullable=True)
 
+    # Role: 'seller' | 'buyer' | None
+    role = Column(String(20), nullable=True)
+
+    # Platform: 'line' | 'messenger' | 'web' | None
+    platform = Column(String(20), nullable=True)
+
+    # Trust scoring (dedicated columns for fast query/display)
+    risk_score = Column(Float, nullable=True)         # 0-100
+    trust_level = Column(String(20), nullable=True)   # bronze | silver | gold | platinum
+
     def __repr__(self):
         return f"<KYCVerification(id={self.id}, user_id={self.user_id}, status={self.status})>"
 
@@ -92,7 +102,11 @@ class KYCVerification(Base):
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
             'verified_at': self.verified_at.isoformat() if self.verified_at else None,
-            'notes': self.notes
+            'notes': self.notes,
+            'role': self.role,
+            'platform': self.platform,
+            'risk_score': self.risk_score,
+            'trust_level': self.trust_level
         }
 
 

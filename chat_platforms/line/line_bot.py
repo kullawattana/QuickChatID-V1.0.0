@@ -195,91 +195,178 @@ class LineBotHandler:
             }
         }
     
-    def create_trust_badge_flex(self, trust_level: str, risk_score: float, 
-                                transaction_limit: int) -> Dict:
+    def create_trust_badge_flex(self, trust_level: str, risk_score: float,
+                                transaction_limit: int, name: str = None,
+                                issued_date: str = None, role: str = None) -> Dict:
         """Create Trust Badge result Flex Message"""
-        
-        badge_colors = {
-            'bronze': '#CD7F32',
-            'silver': '#C0C0C0',
-            'gold': '#FFD700',
-            'platinum': '#E5E4E2'
+        import datetime
+
+        badge_config = {
+            'bronze': {'color': '#CD7F32', 'bg': '#FFF8F0', 'emoji': '🥉', 'label': 'BRONZE'},
+            'silver': {'color': '#808080', 'bg': '#F5F5F5', 'emoji': '🥈', 'label': 'SILVER'},
+            'gold':   {'color': '#B8860B', 'bg': '#FFFDE7', 'emoji': '🥇', 'label': 'GOLD'},
+            'platinum': {'color': '#5C5C5C', 'bg': '#F3F0FF', 'emoji': '💎', 'label': 'PLATINUM'},
         }
-        
-        badge_emojis = {
-            'bronze': '🥉',
-            'silver': '🥈',
-            'gold': '🥇',
-            'platinum': '💎'
+        benefits_map = {
+            'bronze':   ['ยืนยันตัวตนขั้นพื้นฐาน', 'ธุรกรรมมาตรฐาน', 'อีเมลซัพพอร์ต'],
+            'silver':   ['ยืนยันตัวตนขั้นสูง', 'ประมวลผลด่วน', 'Chat ซัพพอร์ต', 'ค่าธรรมเนียมต่ำลง'],
+            'gold':     ['ยืนยันตัวตนพรีเมียม', 'Fast-track', 'ซัพพอร์ต 24/7', 'ยกเว้นค่าธรรมเนียม', 'ฟีเจอร์พิเศษ'],
+            'platinum': ['ยืนยันระดับสูงสุด', 'ประมวลผลทันที', 'ผู้จัดการเฉพาะ', 'ฟรีทุกค่าธรรมเนียม', 'สิทธิ์ VIP'],
         }
-        
-        color = badge_colors.get(trust_level, '#999999')
-        emoji = badge_emojis.get(trust_level, '✅')
-        
+        role_config = {
+            'seller': {
+                'icon': '🏪', 'label': 'ผู้ขาย ที่ผ่านการยืนยัน',
+                'header_color': '#E65100', 'header_bg': '#FFF3E0',
+                'benefits': ['เปิดร้านค้าออนไลน์ได้', 'รับชำระเงินได้', 'วงเงินตามระดับ Badge', 'แสดงป้ายผู้ขายน่าเชื่อถือ'],
+            },
+            'buyer': {
+                'icon': '🛒', 'label': 'ผู้ซื้อ ที่ผ่านการยืนยัน',
+                'header_color': '#1565C0', 'header_bg': '#E3F2FD',
+                'benefits': ['ซื้อสินค้าออนไลน์ได้', 'ความคุ้มครองผู้ซื้อ', 'วงเงินซื้อสินค้า', 'Fast checkout'],
+            },
+        }
+
+        cfg = badge_config.get(trust_level.lower(), badge_config['bronze'])
+        role_key = (role or '').lower()
+        rcfg = role_config.get(role_key)
+
+        # Override header bg/color and benefits if role is specified
+        if rcfg:
+            cfg = dict(cfg)
+            cfg['bg'] = rcfg['header_bg']
+            benefits = rcfg['benefits']
+            header_title = f"{rcfg['icon']} {rcfg['label']}"
+        else:
+            benefits = benefits_map.get(trust_level.lower(), [])
+            header_title = "🎉 ยืนยันตัวตนสำเร็จ!"
+
+        limit_text = f"฿{transaction_limit:,}" if transaction_limit > 0 else "ไม่จำกัด"
+        score_text = f"{risk_score:.0f}/100"
+        issued_text = issued_date or datetime.datetime.now().strftime('%d/%m/%Y')
+        expires_text = (datetime.datetime.now() + datetime.timedelta(days=365)).strftime('%d/%m/%Y')
+
+        # Build benefits rows
+        benefit_rows = [
+            {
+                "type": "box",
+                "layout": "horizontal",
+                "spacing": "sm",
+                "contents": [
+                    {"type": "text", "text": "✓", "size": "sm", "color": cfg['color'], "flex": 0},
+                    {"type": "text", "text": b, "size": "sm", "color": "#444444", "wrap": True}
+                ]
+            }
+            for b in benefits
+        ]
+
+        name_row = []
+        if name:
+            name_row = [
+                {
+                    "type": "text",
+                    "text": name,
+                    "size": "md",
+                    "color": "#333333",
+                    "align": "center",
+                    "margin": "sm"
+                }
+            ]
+
         return {
             "type": "bubble",
+            "styles": {
+                "header": {"backgroundColor": cfg['bg']},
+                "body": {"backgroundColor": "#FFFFFF"}
+            },
+            "header": {
+                "type": "box",
+                "layout": "vertical",
+                "paddingAll": "20px",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": header_title,
+                        "weight": "bold",
+                        "size": "lg",
+                        "align": "center",
+                        "color": rcfg['header_color'] if rcfg else "#333333"
+                    },
+                    {
+                        "type": "text",
+                        "text": f"{cfg['emoji']} {cfg['label']} BADGE",
+                        "size": "xxl",
+                        "weight": "bold",
+                        "color": cfg['color'],
+                        "align": "center",
+                        "margin": "md"
+                    },
+                    *name_row
+                ]
+            },
             "body": {
+                "type": "box",
+                "layout": "vertical",
+                "spacing": "md",
+                "paddingAll": "20px",
+                "contents": [
+                    {
+                        "type": "box",
+                        "layout": "horizontal",
+                        "contents": [
+                            {"type": "text", "text": "คะแนนความน่าเชื่อถือ", "size": "sm", "color": "#888888", "flex": 2},
+                            {"type": "text", "text": score_text, "size": "sm", "color": cfg['color'], "weight": "bold", "align": "end", "flex": 1}
+                        ]
+                    },
+                    {
+                        "type": "box",
+                        "layout": "horizontal",
+                        "contents": [
+                            {"type": "text", "text": "วงเงินธุรกรรม", "size": "sm", "color": "#888888", "flex": 2},
+                            {"type": "text", "text": limit_text, "size": "sm", "color": "#111111", "weight": "bold", "align": "end", "flex": 1}
+                        ]
+                    },
+                    {
+                        "type": "box",
+                        "layout": "horizontal",
+                        "contents": [
+                            {"type": "text", "text": "วันที่ออก", "size": "sm", "color": "#888888", "flex": 2},
+                            {"type": "text", "text": issued_text, "size": "sm", "color": "#111111", "align": "end", "flex": 1}
+                        ]
+                    },
+                    {
+                        "type": "box",
+                        "layout": "horizontal",
+                        "contents": [
+                            {"type": "text", "text": "วันหมดอายุ", "size": "sm", "color": "#888888", "flex": 2},
+                            {"type": "text", "text": expires_text, "size": "sm", "color": "#111111", "align": "end", "flex": 1}
+                        ]
+                    },
+                    {"type": "separator", "margin": "md"},
+                    {
+                        "type": "text",
+                        "text": "สิทธิประโยชน์",
+                        "size": "sm",
+                        "weight": "bold",
+                        "color": "#555555",
+                        "margin": "md"
+                    },
+                    *benefit_rows
+                ]
+            },
+            "footer": {
                 "type": "box",
                 "layout": "vertical",
                 "contents": [
                     {
-                        "type": "text",
-                        "text": "🎉 ยืนยันตัวตนสำเร็จ!",
-                        "weight": "bold",
-                        "size": "xl",
-                        "align": "center"
-                    },
-                    {
-                        "type": "separator",
-                        "margin": "xl"
-                    },
-                    {
-                        "type": "box",
-                        "layout": "vertical",
-                        "margin": "xl",
-                        "spacing": "md",
-                        "contents": [
-                            {
-                                "type": "text",
-                                "text": f"{emoji} {trust_level.upper()} BADGE",
-                                "size": "xxl",
-                                "weight": "bold",
-                                "color": color,
-                                "align": "center"
-                            },
-                            {
-                                "type": "text",
-                                "text": f"Risk Score: {risk_score:.1f}/100",
-                                "size": "sm",
-                                "color": "#999999",
-                                "align": "center"
-                            },
-                            {
-                                "type": "separator",
-                                "margin": "xl"
-                            },
-                            {
-                                "type": "box",
-                                "layout": "horizontal",
-                                "margin": "xl",
-                                "contents": [
-                                    {
-                                        "type": "text",
-                                        "text": "วงเงินธุรกรรม:",
-                                        "size": "sm",
-                                        "color": "#555555",
-                                        "flex": 0
-                                    },
-                                    {
-                                        "type": "text",
-                                        "text": f"฿{transaction_limit:,}" if transaction_limit > 0 else "ไม่จำกัด",
-                                        "size": "sm",
-                                        "color": "#111111",
-                                        "align": "end"
-                                    }
-                                ]
-                            }
-                        ]
+                        "type": "button",
+                        "style": "primary",
+                        "color": cfg['color'],
+                        "height": "sm",
+                        "action": {
+                            "type": "message",
+                            "label": "ดูสถานะ",
+                            "text": "สถานะ"
+                        }
                     }
                 ]
             }

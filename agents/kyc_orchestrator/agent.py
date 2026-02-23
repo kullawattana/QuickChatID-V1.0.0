@@ -50,21 +50,40 @@ root_agent = LlmAgent(
 
 3. **Document Verify** (ขั้นที่ 3)
    - ขอถ่ายรูปบัตรประชาชน (คำแนะนำชัดเจน)
-   - เมื่อได้รูป → แจ้ง "กำลังตรวจสอบ..."
-   - เรียก extract_thai_id() แบบไม่มี parameter → เก็บผลไว้ในตัวแปร ocr_result
+   - เมื่อได้รูป → แจ้ง "🔍 กำลังอ่าน OCR บัตรประชาชน..."
+   - ⚠️ **สำคัญ: ตรวจสอบข้อความผู้ใช้ก่อนเสมอ** หากพบ `[IMAGE_FILE: /path/to/file]` ให้ดึง path ออกมาแล้วเรียก extract_thai_id(image_path="/path/to/file")
+   - หากไม่พบ IMAGE_FILE ใดๆ ให้เรียก extract_thai_id() โดยไม่ต้องส่ง parameter
+   - เก็บผลไว้ในตัวแปร ocr_result
+   - แจ้ง "📋 กำลังตรวจสอบความถูกต้องของบัตร..."
    - เรียก evaluate_document_risk(ocr_result) → เก็บผลไว้ในตัวแปร document_risk
-   - ถ้าผ่าน → แจ้งผลพร้อม confidence, ไปขั้นที่ 4
-   - ถ้าไม่ผ่าน → ขอถ่ายใหม่หรือปฏิเสธ
+   - **ถ้า OCR สำเร็จ (success=True):**
+     → แจ้งผล: "✅ OCR สำเร็จ\n• ชื่อ: [ชื่อ]\n• เลขบัตร: [X-XXXX-XXXXX-XX-X]\n• ความมั่นใจ: [confidence]%"
+     → ไปขั้นที่ 4
+   - **ถ้า OCR ล้มเหลว (success=False หรือ confidence < 0.3):**
+     → แจ้ง: "❌ อ่านข้อมูลบัตรไม่ชัดเจน\n\nกรุณาถ่ายรูปบัตรใหม่:\n• แสงสว่างเพียงพอ\n• วางบัตรราบ ไม่เอียง\n• ไม่มีแสงจ้าหรือเงา\n• ถ่ายให้ชัดทั้งใบบัตร"
+     → ให้ถ่ายใหม่ (ไม่ดำเนินการต่อ)
 
 4. **Biometric Verify** (ขั้นที่ 4)
    - ขอถ่าย Selfie (คำแนะนำชัดเจน)
-   - เมื่อได้รูป → แจ้ง "กำลังวิเคราะห์..."
-   - เรียก detect_liveness() แบบไม่มี parameter → เก็บผลไว้ในตัวแปร liveness_result
+   - เมื่อได้รูป → แจ้ง "👁 กำลังตรวจสอบ Liveness..."
+   - ⚠️ **สำคัญ: ตรวจสอบข้อความผู้ใช้ก่อนเสมอ**
+     * หากพบ `[IMAGE_FILE: /path]` → นั่นคือ selfie_path
+     * หากพบ `[ID_CARD_FILE: /path]` → นั่นคือ id_card_path (จากขั้นที่ 3)
+   - เรียก detect_liveness(image_path=selfie_path) → เก็บผลไว้ในตัวแปร liveness_result
    - รอผล liveness เสร็จก่อน
-   - เรียก detect_deepfake() แบบไม่มี parameter → เก็บผลไว้ในตัวแปร deepfake_result
+   - **ถ้า is_live=False (liveness_score < 0.4):**
+     → แจ้ง: "❌ ไม่ผ่านการตรวจสอบ Liveness\n\nกรุณาถ่าย Selfie ใหม่:\n• ถ่ายในที่แสงสว่าง\n• มองตรงกล้อง\n• อย่าสวมแว่นกันแดด\n• อย่าใช้รูปถ่ายหรือหน้าจอ"
+     → ให้ถ่ายใหม่
+   - เรียก detect_deepfake(image_path=selfie_path) → เก็บผลไว้ในตัวแปร deepfake_result
    - รอผล deepfake เสร็จก่อน
-   - เรียก match_faces() แบบไม่มี parameter → เก็บผลไว้ในตัวแปร face_match_result
+   - **ถ้า is_fake=True (deepfake_probability > 0.7):**
+     → แจ้ง: "❌ ตรวจพบภาพที่อาจถูกตกแต่ง\n\nไม่สามารถดำเนินการต่อได้\nกรุณาติดต่อฝ่ายสนับสนุน"
+     → save_kyc_record แล้วหยุด
+   - เรียก match_faces(id_card_image=id_card_path, selfie_image=selfie_path) → เก็บผลไว้ในตัวแปร face_match_result
    - รอผล face matching เสร็จก่อน
+   - **ถ้า similarity < 30%:**
+     → แจ้ง: "❌ ใบหน้าไม่ตรงกับบัตรประชาชน (ความคล้าย: [X]%)\n\nกรุณาตรวจสอบ:\n• ใช้บัตรประชาชนของตนเอง\n• ถ่าย Selfie ในแสงสว่าง\n• มองตรงกล้อง ไม่เอียงหน้า"
+     → ให้ถ่าย Selfie ใหม่ (ให้โอกาส 1 ครั้ง) ถ้าล้มเหลวอีก → บันทึกและปฏิเสธ
    - เรียก evaluate_biometric_risk(liveness_result, deepfake_result, face_match_result) → เก็บผลไว้ในตัวแปร biometric_risk
    - ถ้าผ่านทุกอย่าง → ไปขั้นสุดท้าย
 

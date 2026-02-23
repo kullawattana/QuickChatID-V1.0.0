@@ -300,6 +300,137 @@ class OCRService:
             print(f"Tesseract extraction failed: {e}")
             return self._extract_mock(image_path)
 
+    def _prepare_image_for_typhoon(self, image_path: str) -> str:
+        """
+        Resize and enhance image before sending to Typhoon VLM.
+        Typhoon ignores target_image_dim for JPEG images - must resize manually.
+        Target: longest side 2400px (downscale only), enhance contrast.
+        Returns path to processed image (temp file).
+        """
+        try:
+            from PIL import Image as PILImage, ImageEnhance
+            import tempfile
+
+            img = PILImage.open(image_path).convert('RGB')
+            w, h = img.size
+            max_dim = max(w, h)
+            target = 2400
+
+            # Always scale to target (upscale small images too — VLM reads better at 2400px)
+            if max_dim != target:
+                scale = target / max_dim
+                new_w, new_h = int(w * scale), int(h * scale)
+                img = img.resize((new_w, new_h), PILImage.LANCZOS)
+                print(f"📐 Scaled image: {w}×{h} → {new_w}×{new_h}")
+            else:
+                print(f"📐 Image already at target size: {w}×{h}")
+
+            # Contrast enhancement via PIL
+            img = ImageEnhance.Contrast(img).enhance(1.4)
+
+            # Unsharp mask via cv2 — much sharper than PIL's basic filter
+            import cv2 as _cv2
+            import numpy as _np
+            img_bgr = _cv2.cvtColor(_np.array(img), _cv2.COLOR_RGB2BGR)
+            blurred = _cv2.GaussianBlur(img_bgr, (0, 0), 2)
+            sharpened = _cv2.addWeighted(img_bgr, 1.8, blurred, -0.8, 0)
+            img = PILImage.fromarray(_cv2.cvtColor(sharpened, _cv2.COLOR_BGR2RGB))
+
+            # Save to temp file
+            base, ext = os.path.splitext(image_path)
+            ext = ext.lower() if ext.lower() in ('.jpg', '.jpeg', '.png') else '.jpg'
+            processed_path = f"{base}_typhoon_ready{ext}"
+            img.save(processed_path, format='JPEG', quality=95)
+            print(f"✅ Saved enhanced image for Typhoon: {processed_path}")
+            return processed_path
+        except Exception as e:
+            print(f"⚠️  Image preparation failed, using original: {e}")
+            return image_path
+
+    def _extract_address_from_crop(self, image_path: str, api_key: str) -> str:
+        """
+        Crop the address area of a Thai ID card and run a focused OCR pass.
+        Thai ID card address is in the bottom ~55-85% of the card, full width.
+        Returns raw address text (empty string if extraction fails).
+        """
+        try:
+            from typhoon_ocr import ocr_document
+            from PIL import Image as PILImage, ImageEnhance
+            import cv2 as _cv2
+            import numpy as _np
+
+            img = PILImage.open(image_path).convert('RGB')
+            w, h = img.size
+
+            # Address region: rows 45-93% from top, columns 0-100% (full width)
+            # Captures address + province/postal while avoiding issue/expiry date area
+            x1, y1 = int(w * 0.01), int(h * 0.45)
+            x2, y2 = int(w * 0.99), int(h * 0.93)
+            crop = img.crop((x1, y1, x2, y2))
+            cw, ch = crop.size
+            print(f"✂️  Address crop: ({x1},{y1})-({x2},{y2}) → {cw}×{ch}")
+
+            # Upscale crop to 2400px (makes small address text much larger)
+            scale = 2400 / max(cw, ch)
+            crop = crop.resize((int(cw * scale), int(ch * scale)), PILImage.LANCZOS)
+
+            # Enhance for VLM — stronger than full-card pass (small text in crop)
+            crop = ImageEnhance.Contrast(crop).enhance(1.6)
+            img_bgr = _cv2.cvtColor(_np.array(crop), _cv2.COLOR_RGB2BGR)
+            # Stronger unsharp mask for small Thai characters
+            blurred = _cv2.GaussianBlur(img_bgr, (0, 0), 1.5)
+            sharpened = _cv2.addWeighted(img_bgr, 2.0, blurred, -1.0, 0)
+            crop = PILImage.fromarray(_cv2.cvtColor(sharpened, _cv2.COLOR_BGR2RGB))
+
+            # Save crop
+            base = os.path.splitext(image_path)[0]
+            crop_path = f"{base}_addr_crop.jpg"
+            crop.save(crop_path, format='JPEG', quality=95)
+
+            # OCR the crop
+            crop_md = (ocr_document(pdf_or_image_path=crop_path, api_key=api_key) or "").strip()
+            print(f"✂️  Address crop OCR (full):\n{crop_md}")
+
+            # Extract address lines from the crop output — preserve document ORDER
+            addr_keywords = ['หมู่', 'ถนน', 'ตำบล', 'อำเภอ', 'จังหวัด', 'ต.', 'อ.', 'จ.', 'ซอย', 'แขวง', 'เขต']
+            # Keywords that mark non-address content (skip these)
+            skip_keywords = ['เกิดวันที่', 'Date of Birth', 'วันออกบัตร', 'Date of Issue',
+                             'วันหมดอายุ', 'Date of Expiry', 'ชื่อ', 'เลขประจำตัว', 'Name']
+
+            addr_lines_ordered = []
+            for line in crop_md.splitlines():
+                clean = line.strip().lstrip('-').lstrip('•').strip()
+                if not clean or clean.startswith('#'):
+                    continue
+                # Skip known non-address sections
+                if any(kw in clean for kw in skip_keywords):
+                    continue
+                score = sum(1 for kw in addr_keywords if kw in clean)
+                if score > 0:
+                    addr_lines_ordered.append(clean)
+
+            if addr_lines_ordered:
+                # Preserve original order (important for house/sub-dist/district/province)
+                address = re.sub(r'\s+', ' ', ' '.join(addr_lines_ordered[:4])).strip()
+                print(f"✂️  Address extracted from crop: {address}")
+                return address
+
+            # Fallback: any Thai/digit content line
+            all_content_lines = []
+            for line in crop_md.splitlines():
+                clean = line.strip().lstrip('-').lstrip('•').strip()
+                if clean and not clean.startswith('#') and not any(kw in clean for kw in skip_keywords):
+                    if any(c.isdigit() for c in clean) or any('\u0e00' <= c <= '\u0e7f' for c in clean):
+                        all_content_lines.append(clean)
+            if all_content_lines:
+                address = re.sub(r'\s+', ' ', ' '.join(all_content_lines[:3])).strip()
+                print(f"✂️  Address extracted from crop (fallback): {address}")
+                return address
+
+        except Exception as e:
+            print(f"⚠️  Address crop OCR failed: {e}")
+        return ""
+
     def _extract_typhoon(self, image_path: str) -> Dict:
         """Extract using Typhoon OCR (API)"""
         try:
@@ -311,12 +442,31 @@ class OCRService:
             if not api_key:
                 raise ValueError("TYPHOON_OCR_API_KEY or OPENAI_API_KEY environment variable not set")
 
+            # Typhoon ignores target_image_dim for JPEG — resize manually first
+            prepared_path = self._prepare_image_for_typhoon(image_path)
+
             markdown = ocr_document(
-                pdf_or_image_path=image_path,
-                api_key=api_key
+                pdf_or_image_path=prepared_path,
+                api_key=api_key,
             )
             text = (markdown or "").strip()
             lines = [line.strip() for line in text.splitlines() if line.strip()]
+
+            # Log raw output for debugging hallucination issues
+            print(f"📄 Typhoon OCR raw output ({len(text)} chars):\n{text[:1000]}")
+
+            # Second pass: focused crop on address area for better accuracy
+            crop_address = self._extract_address_from_crop(image_path, api_key)
+            if crop_address:
+                # Inject crop address into text so _extract_from_markdown can find it
+                # Replace any existing ## ที่อยู่ section with the crop result
+                addr_section = f"\n## ที่อยู่\n- {crop_address}\n"
+                if '## ที่อยู่' in text:
+                    text = re.sub(r'##\s*ที่อยู่[\s\S]*?(?=\n##|$)', addr_section, text)
+                else:
+                    text = text + addr_section
+                lines = [line.strip() for line in text.splitlines() if line.strip()]
+                print(f"✅ Address replaced with crop result: {crop_address}")
 
             return {
                 'text': text,
@@ -331,20 +481,16 @@ class OCRService:
             return self._extract_mock(image_path)
     
     def _extract_mock(self, image_path: str) -> Dict:
-        """Mock extraction"""
+        """Mock extraction - returns empty result, not fake data"""
+        print(f"⚠️  No OCR backend available for: {image_path}")
         return {
-            'text': 'บัตรประจำตัวประชาชน\nนายสมชาย ใจดี\n1234567890123\n01 ม.ค. 2533',
-            'lines': [
-                'บัตรประจำตัวประชาชน',
-                'นายสมชาย ใจดี',
-                '1234567890123',
-                '01 ม.ค. 2533'
-            ],
-            'confidence': 0.85,
+            'text': '',
+            'lines': [],
+            'confidence': 0.0,
             'backend': 'mock',
             'boxes': [],
-            'success': True,
-            'note': 'Mock OCR - Install PaddleOCR for real extraction'
+            'success': False,
+            'note': 'No OCR backend available. Install typhoon-ocr or PaddleOCR.'
         }
     
     def preprocess_image(self, image_path: str) -> np.ndarray:
@@ -443,19 +589,23 @@ class OCRService:
         """Extract fields from Typhoon OCR markdown format"""
         fields = {}
 
-        # Extract ID number - remove all spaces and dashes
-        id_patterns = [
-            r'เลขประจำตัวประชาชน[\s\S]*?[-\s]*(\d[\s-]*\d[\s-]*\d[\s-]*\d[\s-]*\d[\s-]*\d[\s-]*\d[\s-]*\d[\s-]*\d[\s-]*\d[\s-]*\d[\s-]*\d[\s-]*\d)',
-            r'ID.*?(\d[\s-]*\d[\s-]*\d[\s-]*\d[\s-]*\d[\s-]*\d[\s-]*\d[\s-]*\d[\s-]*\d[\s-]*\d[\s-]*\d[\s-]*\d[\s-]*\d)',
-        ]
-        for pattern in id_patterns:
-            match = re.search(pattern, text)
-            if match:
-                id_number = re.sub(r'[\s-]', '', match.group(1))
-                if len(id_number) == 13 and id_number.isdigit():
-                    fields['id_number'] = id_number
-                    fields['id_valid'] = self.validate_thai_id(id_number)
-                    break
+        # Extract ID number — Typhoon sometimes appends extra trailing digit (e.g. "1 3580 22055 37 5 0")
+        # Strategy: extract all digits near เลขประจำตัวประชาชน, try 13-digit slices, pick valid checksum
+        id_section_match = re.search(r'เลขประจำตัวประชาชน[\s\S]*?\n[-\s]*([\d\s-]+)', text)
+        if id_section_match:
+            raw_digits = re.sub(r'[\s-]', '', id_section_match.group(1).split('\n')[0])
+            # Try first 13 digits, then 14 digits sliced to 13
+            for start in range(max(1, len(raw_digits) - 14), -1, -1):
+                candidate = raw_digits[start:start+13]
+                if len(candidate) == 13 and candidate.isdigit():
+                    if self.validate_thai_id(candidate):
+                        fields['id_number'] = candidate
+                        fields['id_valid'] = True
+                        break
+            # Even if checksum fails, store the best 13-digit candidate (first 13)
+            if 'id_number' not in fields and len(raw_digits) >= 13:
+                fields['id_number'] = raw_digits[:13]
+                fields['id_valid'] = False
 
         # Extract Thai name
         thai_name_pattern = r'(?:ชื่อตัวและชื่อสกุล|ชื่อ-นามสกุล)[\s\S]*?[-\s]*((?:นาย|นาง|นางสาว)\s+[ก-๙\s]+)'
@@ -485,28 +635,27 @@ class OCRService:
             fields['name_en'] = first_name
 
         # Extract dates (Thai format)
-        # Birth date - try multiple patterns
+        # Use [^#]* to stay within the current Markdown section (stop before next ##)
+        THAI_MONTH = r'(?:ม\.ค\.|ก\.พ\.|มี\.ค\.|เม\.ย\.|พ\.ค\.|มิ\.ย\.|ก\.ค\.|ส\.ค\.|ก\.ย\.|ต\.ค\.|พ\.ย\.|ธ\.ค\.)'
+        EN_MONTH   = r'(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)'
+
+        # Birth date — stop at next ## to avoid bleeding into issue-date section
         birth_patterns = [
-            r'Date of Birth[:\s]*(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\.?\s*\d{4})',
-            r'เกิดวันที่[\s\S]*?[-\s]*(\d{1,2}\s+(?:ม\.ค\.|ก\.พ\.|มี\.ค\.|เม\.ย\.|พ\.ค\.|มิ\.ย\.|ก\.ค\.|ส\.ค\.|ก\.ย\.|ต\.ค\.|พ\.ย\.|ธ\.ค\.)\s*\d{0,4})',
+            rf'เกิดวันที่[^#]*?[-\s]*(\d{{1,2}}\s+{THAI_MONTH}\s+\d{{4}})',   # Thai WITH year
+            rf'เกิดวันที่[^#]*?Date of Birth[^#\n]*?(\d{{1,2}}\s+{EN_MONTH}\.?\s*\d{{4}})',  # English WITH year
+            rf'เกิดวันที่[^#]*?[-\s]*(\d{{1,2}}\s+{THAI_MONTH})',               # Thai NO year
+            rf'เกิดวันที่[^#]*?Date of Birth[^#\n]*?(\d{{1,2}}\s+{EN_MONTH}\.?)',# English NO year
         ]
         for pattern in birth_patterns:
             match = re.search(pattern, text)
             if match:
-                date_str = match.group(1).strip()
-                # If year is missing, try to get it from context
-                if not re.search(r'\d{4}', date_str):
-                    # Try to find year near the date
-                    year_match = re.search(pattern + r'[\s\S]{0,50}?(\d{4})', text)
-                    if year_match:
-                        date_str = f"{date_str} {year_match.group(2)}"
-                fields['date_of_birth'] = date_str
+                fields['date_of_birth'] = match.group(1).strip()
                 break
 
-        # Issue date
+        # Issue date — scoped to วันออกบัตร section only
         issue_patterns = [
-            r'Date of Issue[:\s]*(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\.?\s*\d{4})',
-            r'วันออกบัตร[\s\S]*?[-\s]*(\d{1,2}\s+(?:ม\.ค\.|ก\.พ\.|มี\.ค\.|เม\.ย\.|พ\.ค\.|มิ\.ย\.|ก\.ค\.|ส\.ค\.|ก\.ย\.|ต\.ค\.|พ\.ย\.|ธ\.ค\.)\s*\d{4})',
+            rf'วันออกบัตร[^#]*?Date of Issue[^#\n]*?(\d{{1,2}}\s+{EN_MONTH}\.?\s*\d{{4}})',
+            rf'วันออกบัตร[^#]*?[-\s]*(\d{{1,2}}\s+{THAI_MONTH}\s+\d{{4}})',
         ]
         for pattern in issue_patterns:
             match = re.search(pattern, text)
@@ -514,10 +663,10 @@ class OCRService:
                 fields['issue_date'] = match.group(1).strip()
                 break
 
-        # Expiry date
+        # Expiry date — scoped to วันหมดอายุ section only
         expiry_patterns = [
-            r'Date of Expiry[:\s]*(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\.?\s*\d{4})',
-            r'วันหมดอายุ[\s\S]*?[-\s]*(\d{1,2}\s+(?:ม\.ค\.|ก\.พ\.|มี\.ค\.|เม\.ย\.|พ\.ค\.|มิ\.ย\.|ก\.ค\.|ส\.ค\.|ก\.ย\.|ต\.ค\.|พ\.ย\.|ธ\.ค\.)\s*\d{4})',
+            rf'วันหมดอายุ[^#]*?Date of Expiry[^#\n]*?(\d{{1,2}}\s+{EN_MONTH}\.?\s*\d{{4}})',
+            rf'วันหมดอายุ[^#]*?[-\s]*(\d{{1,2}}\s+{THAI_MONTH}\s+\d{{4}})',
         ]
         for pattern in expiry_patterns:
             match = re.search(pattern, text)
@@ -525,14 +674,23 @@ class OCRService:
                 fields['expiry_date'] = match.group(1).strip()
                 break
 
-        # Extract address
-        address_pattern = r'ที่อยู่[\s\S]*?[-\s]*(\d+/?\d*\s+[^#\n]+?)(?=\n##|\n\n|$)'
-        match = re.search(address_pattern, text)
-        if match:
-            address = match.group(1).strip()
-            # Clean up address
-            address = re.sub(r'\s+', ' ', address)
-            fields['address'] = address
+        # Extract address — capture the full ที่อยู่ section (may be multi-line)
+        addr_section_match = re.search(r'##\s*ที่อยู่[^\n]*\n([\s\S]*?)(?=\n##|##|$)', text)
+        if addr_section_match:
+            addr_content = addr_section_match.group(1)
+            addr_lines = []
+            for line in addr_content.splitlines():
+                line = line.strip().lstrip('-').lstrip('•').strip()
+                if line and not line.startswith('#'):
+                    addr_lines.append(line)
+            if addr_lines:
+                fields['address'] = re.sub(r'\s+', ' ', ' '.join(addr_lines)).strip()
+        else:
+            # Fallback: single-line pattern
+            address_pattern = r'ที่อยู่[^#]*?[-\s]*(\d+/?\d*\s+[^#\n]+?)(?=\n##|\n\n|$)'
+            match = re.search(address_pattern, text)
+            if match:
+                fields['address'] = re.sub(r'\s+', ' ', match.group(1).strip())
 
         return fields
 

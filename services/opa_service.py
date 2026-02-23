@@ -3,6 +3,7 @@ Open Policy Agent (OPA) Service
 Real policy evaluation for KYC risk assessment
 """
 
+import os
 import requests
 import json
 from typing import Dict, Any
@@ -68,33 +69,41 @@ class OPAService:
         ) * 100
         
         # Determine trust level
-        if risk_score >= 96:
+        _platinum = float(os.getenv('BADGE_PLATINUM_THRESHOLD', '96'))
+        _gold     = float(os.getenv('BADGE_GOLD_THRESHOLD',     '81'))
+        _silver   = float(os.getenv('BADGE_SILVER_THRESHOLD',   '61'))
+        if risk_score >= _platinum:
             trust_level = 'platinum'
-        elif risk_score >= 81:
+        elif risk_score >= _gold:
             trust_level = 'gold'
-        elif risk_score >= 61:
+        elif risk_score >= _silver:
             trust_level = 'silver'
         else:
             trust_level = 'bronze'
-        
+
         # Check blocking conditions
         blocked = False
         block_reasons = []
-        
-        if input_data.get('scam_score', 0) > 0.7:
+
+        _scam_block     = float(os.getenv('SCAM_BLOCK_THRESHOLD', '0.7'))
+        _deepfake_block = float(os.getenv('OPA_DEEPFAKE_MAX',     '0.7'))
+        _liveness_min   = float(os.getenv('OPA_LIVENESS_MIN',     '0.3'))
+        _approval_min   = float(os.getenv('KYC_APPROVAL_MIN_SCORE', '50'))
+
+        if input_data.get('scam_score', 0) > _scam_block:
             blocked = True
             block_reasons.append('High scam score')
-        
-        if input_data.get('deepfake_probability', 0) > 0.7:
+
+        if input_data.get('deepfake_probability', 0) > _deepfake_block:
             blocked = True
             block_reasons.append('Deepfake detected')
-        
-        if liveness_score < 0.3:
+
+        if liveness_score < _liveness_min:
             blocked = True
             block_reasons.append('Failed liveness check')
-        
+
         return {
-            'allow': not blocked and risk_score >= 50,
+            'allow': not blocked and risk_score >= _approval_min,
             'risk_score': round(risk_score, 2),
             'trust_level': trust_level,
             'blocked': blocked,

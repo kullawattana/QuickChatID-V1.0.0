@@ -11,6 +11,7 @@ References:
 - https://github.com/minivision-ai/Silent-Face-Anti-Spoofing
 """
 
+import os
 import cv2
 import numpy as np
 from typing import Dict, Optional
@@ -115,9 +116,9 @@ class DeepfakeDetectionService:
             # Real faces: laplacian_var > 100, gradient > 20
             # Deepfakes: lower variance due to smoothing
 
-            is_blurry = laplacian_var < 50
-            is_smooth = gradient_magnitude < 15
-            has_low_noise = noise_level < 30
+            is_blurry      = laplacian_var < float(os.getenv('DEEPFAKE_BLUR_THRESHOLD',   '50'))
+            is_smooth      = gradient_magnitude < float(os.getenv('DEEPFAKE_SMOOTH_THRESHOLD', '15'))
+            has_low_noise  = noise_level < float(os.getenv('DEEPFAKE_NOISE_THRESHOLD',   '30'))
 
             # Scoring
             fake_score = 0.0
@@ -130,7 +131,7 @@ class DeepfakeDetectionService:
 
             # Normalize to probability
             deepfake_prob = min(fake_score, 1.0)
-            is_fake = deepfake_prob > 0.5
+            is_fake = deepfake_prob > float(os.getenv('DEEPFAKE_BLOCK_THRESHOLD', '0.5'))
 
             return {
                 'is_fake': bool(is_fake),

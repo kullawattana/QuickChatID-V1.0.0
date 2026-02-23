@@ -74,6 +74,21 @@ line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 line_bot_handler = create_line_bot()
 
+# ─── Messenger (Facebook) ────────────────────────────────────────────────────
+MESSENGER_VERIFY_TOKEN      = os.getenv('MESSENGER_VERIFY_TOKEN', '')
+MESSENGER_PAGE_ACCESS_TOKEN = os.getenv('MESSENGER_PAGE_ACCESS_TOKEN', '')
+MESSENGER_APP_SECRET        = os.getenv('MESSENGER_APP_SECRET', '')
+
+messenger_available = bool(MESSENGER_PAGE_ACCESS_TOKEN)  # App Secret optional (skips sig verify)
+if messenger_available:
+    from chat_platforms.messenger.messenger_bot import MessengerBotHandler
+    messenger_bot = MessengerBotHandler(MESSENGER_PAGE_ACCESS_TOKEN, MESSENGER_APP_SECRET)
+    sig_mode = "✅ Signature verify ON" if MESSENGER_APP_SECRET else "⚠️  Signature verify OFF (no App Secret)"
+    print(f"✓ Messenger Bot initialized — {sig_mode}")
+else:
+    messenger_bot = None
+    print("⚠️  Messenger not configured (set MESSENGER_PAGE_ACCESS_TOKEN to enable)")
+
 # Session storage (in production, use Redis or database)
 user_sessions: Dict[str, Dict] = {}
 
@@ -108,6 +123,168 @@ def get_or_create_session(user_id: str) -> Dict:
             })
 
     return user_sessions[user_id]
+
+
+def check_existing_kyc(user_id: str) -> dict:
+    """
+    Check if user already has KYC record in database.
+    Uses priority order: approved > rejected > failed > pending
+    to avoid phantom 'failed' records hiding real approved/rejected ones.
+    Returns dict with: has_record, status, record, trust_badge
+    """
+    try:
+        from database.models import SessionLocal, KYCVerification
+        from sqlalchemy import desc
+
+        db = SessionLocal()
+        try:
+            # Priority: approved first, then rejected, then failed, then pending
+            # Ignore empty phantom records (no first_name AND no id_number)
+            status_priority = ['approved', 'rejected', 'failed', 'pending']
+            record = None
+
+            for status in status_priority:
+                candidate = (
+                    db.query(KYCVerification)
+                    .filter(
+                        KYCVerification.user_id == user_id,
+                        KYCVerification.status == status
+                    )
+                    .order_by(desc(KYCVerification.created_at))
+                    .first()
+                )
+                if candidate:
+                    # Skip phantom records: no name AND no id_number (empty fallback saves)
+                    if candidate.first_name is None and candidate.id_number is None:
+                        continue
+                    record = candidate
+                    break
+
+            # If no real record found, try any record as last resort
+            if not record:
+                record = (
+                    db.query(KYCVerification)
+                    .filter(KYCVerification.user_id == user_id)
+                    .order_by(desc(KYCVerification.created_at))
+                    .first()
+                )
+
+        finally:
+            db.close()
+
+        if not record:
+            return {'has_record': False, 'status': None, 'record': None, 'trust_badge': None}
+
+        # Read trust_level from dedicated column (fast)
+        trust_badge = record.trust_level.upper() if record.trust_level else None
+
+        # Fallback: parse from notes field (old format "trust_level:gold")
+        if not trust_badge and record.notes and 'trust_level:' in record.notes:
+            trust_badge = record.notes.split('trust_level:')[1].split('\n')[0].strip().upper()
+
+        # Fallback: parse from verification_result or notes text
+        if not trust_badge:
+            search_text = (record.verification_result or '') + (record.notes or '')
+            for badge in ['Platinum', 'Gold', 'Silver', 'Bronze']:
+                if badge.lower() in search_text.lower():
+                    trust_badge = badge.upper()
+                    break
+
+        print(f"🔍 DB check for {user_id}: status={record.status}, badge={trust_badge}, score={record.risk_score}, id={record.id}")
+        return {
+            'has_record': True,
+            'status': record.status,
+            'record': record,
+            'trust_badge': trust_badge,
+            'risk_score': record.risk_score or 0
+        }
+    except Exception as e:
+        print(f"⚠️  Error checking existing KYC: {e}")
+        return {'has_record': False, 'status': None, 'record': None, 'trust_badge': None}
+
+
+def _build_status_message(kyc_check: dict) -> str:
+    """สร้างข้อความแสดงสถานะ KYC ปัจจุบัน"""
+    record = kyc_check['record']
+    status_emoji = {'approved': '✅', 'rejected': '❌', 'failed': '⚠️', 'pending': '⏳'}
+    status_text = {'approved': 'ผ่านการยืนยัน', 'rejected': 'ไม่ผ่าน', 'failed': 'ล้มเหลว', 'pending': 'รอดำเนินการ'}
+    name = f"{record.prefix or ''} {record.first_name or ''} {record.last_name or ''}".strip()
+    date_str = record.created_at.strftime('%d/%m/%Y') if record.created_at else ''
+    badge = kyc_check['trust_badge'] or '-'
+    return (
+        f"{status_emoji.get(record.status, '❓')} สถานะการยืนยันตัวตน\n\n"
+        f"👤 ชื่อ: {name or 'ไม่ระบุ'}\n"
+        f"📊 สถานะ: {status_text.get(record.status, record.status)}\n"
+        f"🏅 Trust Badge: {badge}\n"
+        f"📅 วันที่: {date_str}"
+    )
+
+
+def _build_approved_lock_message(kyc_check: dict) -> str:
+    """ข้อความสำหรับ user ที่ approved แล้ว (Lock ห้ามทำซ้ำ)"""
+    record = kyc_check['record']
+    name = f"{record.prefix or ''} {record.first_name or ''} {record.last_name or ''}".strip()
+    badge = kyc_check['trust_badge'] or 'BRONZE'
+    date_str = ''
+    if record.verified_at:
+        date_str = record.verified_at.strftime('%d/%m/%Y')
+    elif record.created_at:
+        date_str = record.created_at.strftime('%d/%m/%Y')
+    return (
+        f"✅ คุณผ่านการยืนยันตัวตนแล้ว\n\n"
+        f"👤 ชื่อ: {name or 'ไม่ระบุ'}\n"
+        f"🏅 ระดับ: {badge} Badge\n"
+        f"📅 วันที่ยืนยัน: {date_str}\n\n"
+        f"ไม่สามารถยืนยันตัวตนซ้ำได้\n"
+        f"พิมพ์ 'สถานะ' เพื่อดูข้อมูลการยืนยัน\n"
+        f"หากมีปัญหา กรุณาติดต่อฝ่ายสนับสนุน"
+    )
+
+
+def _build_rejected_retry_message(kyc_check: dict) -> str:
+    """ข้อความสำหรับ user ที่ rejected/failed (อนุญาตให้ลองใหม่)"""
+    record = kyc_check['record']
+    date_str = record.created_at.strftime('%d/%m/%Y') if record.created_at else ''
+    reason = (record.verification_result or 'ไม่ทราบสาเหตุ')[:100]
+    return (
+        f"⚠️ พบข้อมูลการยืนยันตัวตนครั้งก่อน\n\n"
+        f"📅 วันที่: {date_str}\n"
+        f"❌ สถานะ: ไม่ผ่าน\n"
+        f"📋 สาเหตุ: {reason}\n\n"
+        f"พิมพ์ 'ยืนยันตัวตน' หรือ 'พร้อม' เพื่อเริ่มยืนยันตัวตนใหม่"
+    )
+
+
+def send_badge_push(user_id: str, trust_level: str, risk_score: float = 0,
+                    name: str = None, issued_date: str = None, role: str = None):
+    """
+    Push a Trust Badge Flex Message to LINE user.
+    Used after KYC completion and when returning approved users check status.
+    """
+    try:
+        trust_level = trust_level.lower()
+        limits = {'bronze': 10000, 'silver': 50000, 'gold': 100000, 'platinum': -1}
+        transaction_limit = limits.get(trust_level, 10000)
+
+        flex_content = line_bot_handler.create_trust_badge_flex(
+            trust_level=trust_level,
+            risk_score=risk_score,
+            transaction_limit=transaction_limit,
+            name=name,
+            issued_date=issued_date,
+            role=role
+        )
+
+        line_bot_api.push_message(
+            user_id,
+            FlexSendMessage(
+                alt_text=f"Trust Badge: {trust_level.upper()} - ยืนยันตัวตนสำเร็จ",
+                contents=flex_content
+            )
+        )
+        print(f"🏅 Sent {trust_level.upper()} badge Flex card to {user_id}")
+    except Exception as e:
+        print(f"⚠️  Badge push failed: {e}")
 
 
 def save_image_from_line(message_id: str, user_id: str, image_type: str) -> Optional[str]:
@@ -168,8 +345,8 @@ def call_adk_agent_via_http(user_id: str, message: str, image_path: Optional[str
         masked_msg = presidio_msg.get('anonymized_text', message) if isinstance(presidio_msg, dict) else str(presidio_msg)
         print(f"📤 Calling ADK web server for user {user_id}: {masked_msg[:50]}...")
 
-        # ADK web server URL (assumes it's running on port 8000)
-        ADK_SERVER_URL = "http://localhost:8000"
+        # ADK web server URL (configurable via env for Docker)
+        ADK_SERVER_URL = os.getenv('ADK_SERVER_URL', 'http://localhost:8000')
 
         # Get or create session ID
         if not session.get('adk_session_id'):
@@ -189,43 +366,118 @@ def call_adk_agent_via_http(user_id: str, message: str, image_path: Optional[str
 
         # Send message to agent via ADK web server using SSE endpoint
         # newMessage should be a Content object with role and parts
-        run_response = requests.post(
-            f"{ADK_SERVER_URL}/run_sse",
-            json={
-                "app_name": "kyc_orchestrator",
-                "session_id": adk_session_id,
-                "user_id": user_id,
-                "newMessage": {
-                    "role": "user",
-                    "parts": [{"text": message}]
-                }
-            },
-            timeout=60
-        )
+        # Include image_path in message text so the agent can pass it to OCR/liveness/face tools
+        message_text = message
+        if image_path and os.path.exists(str(image_path)):
+            message_text = f"{message}\n[IMAGE_FILE: {image_path}]"
+            print(f"📎 Appending image path to message: {image_path}")
+
+            # Also append the ID card path if we have it (needed for face matching)
+            stored_images = session.get('uploaded_images', {})
+            id_card_path = stored_images.get('id_card', '')
+            if id_card_path and os.path.exists(str(id_card_path)) and str(id_card_path) != str(image_path):
+                message_text += f"\n[ID_CARD_FILE: {id_card_path}]"
+                print(f"📎 Appending ID card path: {id_card_path}")
+
+        # Progress messages shown in LINE when each tool is called
+        _TOOL_PROGRESS = {
+            'extract_thai_id':        '🔍 กำลังอ่าน OCR บัตรประชาชน...',
+            'evaluate_document_risk': '📋 กำลังตรวจสอบความถูกต้องของบัตร...',
+            'check_scam_intent':      '🛡 กำลังตรวจสอบความปลอดภัย...',
+            'detect_liveness':        '👁 กำลังตรวจสอบ Liveness...',
+            'detect_deepfake':        '🤖 กำลังตรวจสอบ Deepfake...',
+            'match_faces':            '👤 กำลังเปรียบเทียบใบหน้ากับบัตร...',
+            'evaluate_biometric_risk':'📊 กำลังประเมิน Biometric Risk...',
+            'evaluate_final_decision':'⚖️ กำลังตัดสินใจขั้นสุดท้าย...',
+            'issue_trust_badge':      '🏅 กำลังออก Trust Badge...',
+            'save_kyc_record':        '💾 กำลังบันทึกข้อมูล...',
+        }
+        # LINE user IDs start with 'U' and are 33 chars long
+        _is_line_user = user_id.startswith('U') and len(user_id) > 20
+
+        def _push_progress(msg: str):
+            """Push a progress message to LINE (best-effort, never raises)"""
+            if not _is_line_user:
+                return
+            try:
+                line_bot_api.push_message(user_id, TextSendMessage(text=msg))
+            except Exception as pe:
+                print(f"   ⚠️  Progress push failed: {pe}")
+
+        def _do_sse_call(payload: dict) -> requests.Response:
+            return requests.post(
+                f"{ADK_SERVER_URL}/run_sse",
+                json=payload,
+                stream=True,
+                timeout=120
+            )
+
+        run_payload = {
+            "app_name": "kyc_orchestrator",
+            "session_id": adk_session_id,
+            "user_id": user_id,
+            "newMessage": {
+                "role": "user",
+                "parts": [{"text": message_text}]
+            }
+        }
+
+        run_response = _do_sse_call(run_payload)
+
+        # Session recovery: if server restarted, old session is gone — create new and retry once
+        if run_response.status_code in (404, 400):
+            print(f"⚠️  ADK session invalid (status {run_response.status_code}), resetting and retrying...")
+            run_response.close()
+            session['adk_session_id'] = None
+            create_response = requests.post(
+                f"{ADK_SERVER_URL}/apps/kyc_orchestrator/users/{user_id}/sessions",
+                timeout=10
+            )
+            if create_response.status_code == 200:
+                session_data = create_response.json()
+                session['adk_session_id'] = session_data.get('id')
+                adk_session_id = session['adk_session_id']
+                print(f"✓ Created new ADK session after reset: {adk_session_id}")
+                run_payload['session_id'] = adk_session_id
+                _push_progress("⚠️ Session ถูก reset กรุณาเริ่มยืนยันตัวตนใหม่ พิมพ์ 'เริ่มใหม่'")
+                run_response = _do_sse_call(run_payload)
 
         if run_response.status_code != 200:
             print(f"❌ ADK server error: {run_response.status_code}")
-            print(f"Response: {run_response.text[:200]}")
+            body = run_response.text[:200]
+            print(f"Response: {body}")
+            run_response.close()
             return f"เกิดข้อผิดพลาด: ADK server returned {run_response.status_code}"
 
-        # Extract response from ADK
-        # ADK SSE endpoint returns Server-Sent Events format: "data: {...}\n\ndata: {...}"
+        # Stream SSE in real-time: push progress when tool calls are detected
         response_text = ""
+        pushed_tools: set = set()  # avoid duplicate progress for same tool
 
-        for line in run_response.text.split('\n'):
-            line = line.strip()
-            if line.startswith('data: '):
+        try:
+            for raw_line in run_response.iter_lines():
+                if not raw_line:
+                    continue
+                line = raw_line.decode('utf-8') if isinstance(raw_line, bytes) else raw_line
+                if not line.startswith('data: '):
+                    continue
                 try:
-                    # Parse JSON from SSE data line
-                    data = json.loads(line[6:])  # Remove "data: " prefix
-
-                    # Extract text from content.parts
-                    if 'content' in data and 'parts' in data['content']:
-                        for part in data['content']['parts']:
-                            if 'text' in part:
-                                response_text += part['text']
+                    data = json.loads(line[6:])
+                    parts = data.get('content', {}).get('parts', [])
+                    for part in parts:
+                        if 'functionCall' in part:
+                            tool_name = part['functionCall'].get('name', '')
+                            print(f"   🔧 Tool called: {tool_name}")
+                            if tool_name not in pushed_tools:
+                                pushed_tools.add(tool_name)
+                                progress_msg = _TOOL_PROGRESS.get(tool_name)
+                                if progress_msg:
+                                    _push_progress(progress_msg)
+                        elif 'text' in part:
+                            response_text += part['text']
                 except json.JSONDecodeError:
                     continue
+        finally:
+            run_response.close()
 
         if not response_text:
             response_text = "ขออภัย ไม่สามารถประมวลผลได้ กรุณาลองใหม่อีกครั้ง"
@@ -308,13 +560,14 @@ def call_adk_agent(user_id: str, message: str, image_path: Optional[str] = None)
         from datetime import timedelta
         import time
 
-        # Check if response indicates KYC completion
+        # Check if response indicates FINAL KYC completion (not intermediate steps)
+        # Avoid 'เสร็จสิ้น'/'ยินดีด้วย' — they also appear in mid-flow OCR messages
         completion_indicators = [
-            'Trust Badge', 'ยินดีด้วย', 'เสร็จสิ้น',
-            'Platinum', 'Gold', 'Silver', 'Bronze',
-            'ไม่ผ่าน', 'ปฏิเสธ', 'ไม่สามารถยืนยัน',
-            'risk_score < 50', 'scam_score > 0.7',
-            'บล็อก', 'ไม่สามารถดำเนินการต่อ'
+            'Trust Badge',
+            'PLATINUM', 'GOLD', 'SILVER', 'BRONZE',
+            'Platinum Badge', 'Gold Badge', 'Silver Badge', 'Bronze Badge',
+            'ไม่ผ่านการยืนยันตัวตน', 'ปฏิเสธการยืนยัน',
+            'บล็อก', 'ไม่สามารถดำเนินการต่อ',
         ]
 
         is_completion = any(indicator in response for indicator in completion_indicators)
@@ -359,29 +612,47 @@ def call_adk_agent(user_id: str, message: str, image_path: Optional[str] = None)
                 print(f"   ⚠️  OPA/Keycloak error: {opa_err}")
 
             # Give a moment for database to commit (if Agent called save_kyc_record)
-            time.sleep(0.5)
+            time.sleep(1.0)
 
-            # Search for recent records
-            records = KYCRepository.get_all_records(limit=10)
-
-            # Find the most recent record
+            # Search for recent records (within last 90 seconds)
+            records = KYCRepository.get_all_records(limit=20)
             current_time = get_bangkok_time()
             linked = False
+            active_record = None  # Track the record we link/create for direct badge push
+            _window = timedelta(seconds=90)
 
             for record in records:
-                # Check if record was created recently (within last 60 seconds)
-                if record.created_at.replace(tzinfo=None) > (current_time.replace(tzinfo=None) - timedelta(seconds=60)):
-                    if not record.user_id.startswith('U'):  # Not already a LINE user_id
-                        # This looks like the record from this KYC session
-                        original_user_id = record.user_id
-                        KYCRepository.update_kyc_record(
-                            record.id,
-                            user_id=user_id,  # Use LINE user_id
-                            notes=f"LINE User (original: {original_user_id})"
-                        )
-                        print(f"✅ Linked KYC record {record.id} ({record.status}) with LINE user: {user_id}")
-                        linked = True
-                        break
+                rec_time = record.created_at.replace(tzinfo=None)
+                if rec_time <= (current_time.replace(tzinfo=None) - _window):
+                    continue  # too old
+
+                # Case 1: already linked to this LINE user (previous fallback run / proper save)
+                if record.user_id == user_id:
+                    print(f"✅ Record {record.id} ({record.status}) already linked to {user_id} — skip duplicate")
+                    active_record = record
+                    linked = True
+                    break
+
+                # Case 2: created by agent with generated user_id — link it
+                if not record.user_id.startswith('U') and not record.user_id.isdigit():
+                    original_user_id = record.user_id
+                    _platform = 'messenger' if (user_id or '').isdigit() else 'line'
+                    KYCRepository.update_kyc_record(
+                        record.id,
+                        user_id=user_id,
+                        platform=_platform,
+                        notes=f"LINE User (original: {original_user_id})"
+                    )
+                    print(f"✅ Linked KYC record {record.id} ({record.status}) with {user_id}")
+                    # Refresh record from DB to get updated user_id
+                    from database.models import SessionLocal, KYCVerification
+                    _db = SessionLocal()
+                    try:
+                        active_record = _db.query(KYCVerification).filter(KYCVerification.id == record.id).first()
+                    finally:
+                        _db.close()
+                    linked = True
+                    break
 
             # If no recent record found, Agent probably didn't call save_kyc_record
             # Create fallback record
@@ -399,7 +670,13 @@ def call_adk_agent(user_id: str, message: str, image_path: Optional[str] = None)
                 status = 'failed'
                 verification_result = 'Auto-saved: KYC completion detected but Agent did not save record'
 
-                if any(badge in response for badge in ['Platinum', 'Gold', 'Silver', 'Bronze']):
+                # Check badge indicators (case-insensitive, both title and upper)
+                _badge_in_response = any(
+                    b in response for b in ['Platinum', 'Gold', 'Silver', 'Bronze',
+                                            'PLATINUM', 'GOLD', 'SILVER', 'BRONZE',
+                                            'Trust Badge', 'platinum', 'gold', 'silver', 'bronze']
+                )
+                if _badge_in_response:
                     status = 'approved'
                     verification_result = 'Auto-saved: Verification completed with Trust Badge'
                 elif any(reject in response for reject in ['ไม่ผ่าน', 'ปฏิเสธ', 'บล็อก']):
@@ -432,11 +709,6 @@ def call_adk_agent(user_id: str, message: str, image_path: Optional[str] = None)
                     # Try to load from shared OCR storage
                     logger.warning(f"   🔍 No session OCR data, checking shared storage...")
                     try:
-                        import json
-                        import tempfile
-                        from pathlib import Path
-                        import glob
-
                         shared_dir = Path(tempfile.gettempdir()) / 'quickchat_id_ocr'
                         if shared_dir.exists():
                             # Find most recent OCR file (within last 5 minutes)
@@ -508,10 +780,6 @@ def call_adk_agent(user_id: str, message: str, image_path: Optional[str] = None)
                 face_similarity_score = None
                 face_confidence = None
                 try:
-                    import json
-                    import tempfile
-                    from pathlib import Path
-
                     face_shared_dir = Path(tempfile.gettempdir()) / 'quickchat_id_face'
                     if face_shared_dir.exists():
                         # Find most recent face matching file (within last 5 minutes)
@@ -567,6 +835,19 @@ def call_adk_agent(user_id: str, message: str, image_path: Optional[str] = None)
 
                 # Create record with parsed data
                 try:
+                    _platform = 'messenger' if (user_id or '').isdigit() else 'line'
+                    try:
+                        _fb_risk = risk_score
+                        _fb_trust = trust_level
+                    except NameError:
+                        _fb_risk = None
+                        _fb_trust = None
+                    # Parse trust_level from response text if OPA didn't set it
+                    if not _fb_trust:
+                        for _bl in ['platinum', 'gold', 'silver', 'bronze']:
+                            if _bl in response.lower():
+                                _fb_trust = _bl
+                                break
                     fallback_record = KYCRepository.create_kyc_record(
                         user_id=user_id,
                         status=status,
@@ -580,14 +861,46 @@ def call_adk_agent(user_id: str, message: str, image_path: Optional[str] = None)
                         address=address,
                         face_similarity_score=face_similarity_score,
                         face_confidence=face_confidence,
+                        platform=_platform,
+                        risk_score=_fb_risk,
+                        trust_level=_fb_trust,
                         notes=f"Fallback auto-save: Agent did not call save_kyc_record.\nResponse: {response[:500]}"
                     )
                     logger.warning(f"✅ Created fallback record ID: {fallback_record.id}")
+                    active_record = fallback_record
                     linked = True
                 except Exception as fallback_error:
                     logger.error(f"❌ Fallback save failed: {fallback_error}")
                     import traceback
                     traceback.print_exc()
+
+            # [Badge Push] Send Trust Badge Flex Message if KYC is approved
+            # Prefer active_record (just linked/created) for freshness; fallback to check_existing_kyc
+            try:
+                rec = active_record
+                rec_status = rec.status if rec else None
+
+                # If active_record is not approved, also check DB in case it was updated
+                if not rec or rec_status != 'approved':
+                    kyc_badge_check = check_existing_kyc(user_id)
+                    if kyc_badge_check.get('status') == 'approved':
+                        rec = kyc_badge_check.get('record')
+                        rec_status = 'approved'
+
+                if rec_status == 'approved' and rec:
+                    name_parts = [p for p in [rec.prefix, rec.first_name, rec.last_name] if p]
+                    display_name = ' '.join(name_parts) or None
+                    issued = rec.created_at.strftime('%d/%m/%Y') if rec.created_at else None
+                    badge_level = (rec.trust_level or 'bronze').lower()
+                    # Parse trust_level from notes if not in column
+                    if not rec.trust_level and rec.notes and 'trust_level:' in rec.notes:
+                        badge_level = rec.notes.split('trust_level:')[1].split('\n')[0].strip().lower()
+                    _score = rec.risk_score or 0
+                    _role = rec.role if rec else None
+                    print(f"🏅 Sending badge push: level={badge_level}, score={_score}, record={rec.id}")
+                    send_badge_push(user_id, badge_level, _score, name=display_name, issued_date=issued, role=_role)
+            except Exception as badge_err:
+                print(f"⚠️  Could not send badge push: {badge_err}")
 
     except Exception as e:
         print(f"⚠️  Could not link LINE user_id: {e}")
@@ -635,22 +948,69 @@ def handle_text_message(event):
 
     print(f"📩 Message from {user_id}: {text}")
 
-    # Get user session
-    session = get_or_create_session(user_id)
-
-    # Special commands
+    # [1] Special reset command — ก่อนทุกอย่าง (bypass DB check)
     if text.lower() in ['/start', 'เริ่มใหม่', 'restart']:
-        # Reset session
         if user_id in user_sessions:
             del user_sessions[user_id]
-
-        # Send welcome message
         flex_message = line_bot_handler.create_kyc_welcome_flex()
         line_bot_api.reply_message(
             event.reply_token,
             FlexSendMessage(alt_text="QuickChat ID - ยืนยันตัวตน", contents=flex_message)
         )
         return
+
+    # [2] Status check command — ทุก user ดูสถานะได้เสมอ
+    if text.lower() in ['สถานะ', 'ตรวจสอบสถานะ', 'status', '/status']:
+        kyc_check = check_existing_kyc(user_id)
+        if kyc_check['has_record']:
+            reply_text = _build_status_message(kyc_check)
+        else:
+            reply_text = "ยังไม่มีข้อมูลการยืนยันตัวตน\nพิมพ์ 'พร้อม' เพื่อเริ่มยืนยันตัวตน"
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
+        # Send badge flex card as follow-up push if approved
+        if kyc_check.get('status') == 'approved':
+            rec = kyc_check.get('record')
+            display_name = None
+            if rec:
+                name_parts = [p for p in [rec.prefix, rec.first_name, rec.last_name] if p]
+                display_name = ' '.join(name_parts) or None
+            issued = rec.created_at.strftime('%d/%m/%Y') if rec and rec.created_at else None
+            badge_level = (kyc_check.get('trust_badge') or 'bronze').lower()
+            _score = kyc_check.get('risk_score') or (rec.risk_score if rec else 0) or 0
+            _role = rec.role if rec else None
+            send_badge_push(user_id, badge_level, _score, name=display_name, issued_date=issued, role=_role)
+        return
+
+    # [3] Pre-check: ตรวจสอบ DB เฉพาะ fresh session (ยังไม่ได้เริ่มทำ KYC รอบนี้)
+    if user_id not in user_sessions:
+        kyc_check = check_existing_kyc(user_id)
+
+        if kyc_check['status'] == 'approved':
+            # LOCK: ผ่านแล้ว ห้ามทำซ้ำ ไม่สร้าง session
+            reply_text = _build_approved_lock_message(kyc_check)
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
+            # Send badge flex card as push message (reply token already used)
+            rec = kyc_check.get('record')
+            display_name = None
+            if rec:
+                name_parts = [p for p in [rec.prefix, rec.first_name, rec.last_name] if p]
+                display_name = ' '.join(name_parts) or None
+            issued = rec.created_at.strftime('%d/%m/%Y') if rec and rec.created_at else None
+            badge_level = (kyc_check.get('trust_badge') or 'bronze').lower()
+            _score = kyc_check.get('risk_score') or (rec.risk_score if rec else 0) or 0
+            _role = rec.role if rec else None
+            send_badge_push(user_id, badge_level, _score, name=display_name, issued_date=issued, role=_role)
+            return
+
+        elif kyc_check['status'] in ['rejected', 'failed']:
+            # แสดงสาเหตุ + สร้าง session พร้อมให้ลองใหม่
+            reply_text = _build_rejected_retry_message(kyc_check)
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
+            get_or_create_session(user_id)
+            return
+
+    # Get user session (new or existing mid-KYC session)
+    session = get_or_create_session(user_id)
 
     # Call ADK agent
     try:
@@ -799,6 +1159,135 @@ def index():
     </body>
     </html>
     """.format(len(user_sessions))
+
+
+# ─── Facebook Messenger Webhook ──────────────────────────────────────────────
+
+@app.route('/webhook/messenger', methods=['GET'])
+def messenger_verify():
+    """Facebook webhook challenge-response verification"""
+    mode      = request.args.get('hub.mode')
+    token     = request.args.get('hub.verify_token')
+    challenge = request.args.get('hub.challenge')
+    if mode == 'subscribe' and token == MESSENGER_VERIFY_TOKEN:
+        print("✅ Messenger webhook verified")
+        return challenge, 200
+    return 'Forbidden', 403
+
+
+@app.route('/webhook/messenger', methods=['POST'])
+def messenger_webhook():
+    """Receive events from Facebook Messenger"""
+    if not messenger_available:
+        return 'OK', 200
+
+    # Verify HMAC-SHA256 signature (only if App Secret is configured)
+    sig = request.headers.get('X-Hub-Signature-256', '')
+    if sig and MESSENGER_APP_SECRET and not messenger_bot.verify_signature(request.data, sig):
+        abort(403)
+
+    data = request.json
+    if data.get('object') != 'page':
+        return 'OK', 200
+
+    for entry in data.get('entry', []):
+        for event in entry.get('messaging', []):
+            sender_id = event['sender']['id']
+            if 'message' in event:
+                msg = event['message']
+                if msg.get('attachments'):
+                    for att in msg['attachments']:
+                        if att['type'] == 'image':
+                            _handle_messenger_image(sender_id, att['payload']['url'])
+                elif msg.get('text'):
+                    _handle_messenger_text(sender_id, msg['text'])
+            elif 'postback' in event:
+                if event['postback']['payload'] == 'STATUS':
+                    _handle_messenger_text(sender_id, 'สถานะ')
+
+    return 'OK', 200
+
+
+def _handle_messenger_text(sender_id: str, text: str):
+    """Handle text messages — same KYC pre-check + ADK flow as LINE"""
+    print(f"📩 Messenger from {sender_id}: {text[:50]}")
+
+    # [1] Reset command
+    if text.lower() in ['/start', 'เริ่มใหม่', 'restart']:
+        user_sessions.pop(sender_id, None)
+        messenger_bot.send_text_message(
+            sender_id,
+            "สวัสดีครับ! ยินดีต้อนรับสู่ QuickChat ID 🎉\n\n"
+            "ระบบยืนยันตัวตน KYC อัจฉริยะ\n"
+            "พิมพ์ 'พร้อม' เพื่อเริ่มยืนยันตัวตน"
+        )
+        return
+
+    # [2] Status check command
+    if text.lower() in ['สถานะ', 'ตรวจสอบสถานะ', 'status', '/status']:
+        kyc_check = check_existing_kyc(sender_id)
+        if kyc_check['has_record']:
+            messenger_bot.send_text_message(sender_id, _build_status_message(kyc_check))
+            if kyc_check.get('status') == 'approved':
+                _send_messenger_badge(sender_id, kyc_check)
+        else:
+            messenger_bot.send_text_message(
+                sender_id,
+                "ยังไม่มีข้อมูลการยืนยันตัวตน\nพิมพ์ 'พร้อม' เพื่อเริ่มยืนยันตัวตน"
+            )
+        return
+
+    # [3] Pre-check: fresh session only
+    if sender_id not in user_sessions:
+        kyc_check = check_existing_kyc(sender_id)
+        if kyc_check['status'] == 'approved':
+            messenger_bot.send_text_message(sender_id, _build_approved_lock_message(kyc_check))
+            _send_messenger_badge(sender_id, kyc_check)
+            return
+        elif kyc_check['status'] in ['rejected', 'failed']:
+            messenger_bot.send_text_message(sender_id, _build_rejected_retry_message(kyc_check))
+            get_or_create_session(sender_id)
+            return
+
+    # [4] Call ADK agent
+    get_or_create_session(sender_id)
+    try:
+        response_text = call_adk_agent(sender_id, text)
+        guard_result = guardrails.validate_output(response_text)
+        if not guard_result.get('valid', True):
+            response_text = "ขออภัย ระบบตรวจพบเนื้อหาที่ไม่เหมาะสม กรุณาลองใหม่"
+        messenger_bot.send_text_message(sender_id, response_text)
+    except Exception as e:
+        print(f"Messenger error: {e}")
+        messenger_bot.send_text_message(sender_id, f"เกิดข้อผิดพลาด: {str(e)}")
+
+
+def _handle_messenger_image(sender_id: str, image_url: str):
+    """Download image from Facebook CDN and pass to ADK agent"""
+    import uuid
+    get_or_create_session(sender_id)
+    tmp = Path(tempfile.gettempdir()) / f"messenger_{uuid.uuid4().hex}.jpg"
+    if messenger_bot.download_image(image_url, str(tmp)):
+        messenger_bot.send_text_message(sender_id, "📸 ได้รับรูปภาพแล้ว กำลังประมวลผล...")
+        try:
+            response_text = call_adk_agent(sender_id, "ส่งรูปภาพ", image_path=str(tmp))
+            messenger_bot.send_text_message(sender_id, response_text)
+        finally:
+            tmp.unlink(missing_ok=True)
+    else:
+        messenger_bot.send_text_message(sender_id, "ไม่สามารถรับรูปภาพได้ กรุณาลองใหม่")
+
+
+def _send_messenger_badge(sender_id: str, kyc_check: dict):
+    """Send Trust Badge card via Messenger Generic Template"""
+    rec = kyc_check.get('record')
+    parts = [p for p in [rec.prefix, rec.first_name, rec.last_name] if p] if rec else []
+    display_name = ' '.join(parts) or None
+    issued = rec.created_at.strftime('%d/%m/%Y') if rec and rec.created_at else None
+    badge_level = (kyc_check.get('trust_badge') or 'bronze').lower()
+    _score = kyc_check.get('risk_score') or (rec.risk_score if rec else 0) or 0
+    messenger_bot.send_badge_card(sender_id, badge_level, _score,
+                                   name=display_name, issued_date=issued)
 
 
 if __name__ == '__main__':

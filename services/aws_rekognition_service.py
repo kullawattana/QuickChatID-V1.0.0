@@ -55,7 +55,7 @@ class AWSRekognitionService:
         self,
         source_image_path: str,
         target_image_path: str,
-        similarity_threshold: float = 80.0
+        similarity_threshold: float = None
     ) -> Dict:
         """
         Compare two faces using AWS Rekognition.
@@ -75,6 +75,9 @@ class AWSRekognitionService:
                 'details': dict
             }
         """
+        if similarity_threshold is None:
+            similarity_threshold = float(os.getenv('FACE_SIMILARITY_THRESHOLD', '80.0'))
+
         if not self.is_available:
             raise RuntimeError("AWS Rekognition is not available. Check credentials.")
 

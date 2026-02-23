@@ -1,0 +1,27 @@
+# ─── Core AI Agent ────────────────────────────────────────────────────────────
+google-adk>=0.5.0
+google-generativeai>=0.8.0
+
+# ─── Web & Chat Platforms ─────────────────────────────────────────────────────
+flask>=3.0.0
+flask-cors>=4.0.0
+line-bot-sdk>=3.0.0
+requests>=2.32.3
+
+# ─── Cloud Services (replaces local ML) ──────────────────────────────────────
+boto3>=1.35.0          # AWS Rekognition (face matching)
+typhoon-ocr>=0.3.8     # Typhoon OCR API (Thai ID card OCR)
+
+# ─── Image processing (lightweight) ──────────────────────────────────────────
+opencv-python-headless>=4.10.0
+Pillow>=11.0.0
+numpy>=1.26.0
+
+# ─── Database ─────────────────────────────────────────────────────────────────
+sqlalchemy>=2.0.0
+
+# ─── Security & Utils ─────────────────────────────────────────────────────────
+python-dotenv>=1.0.1
+pydantic>=2.9.2
+pyjwt>=2.9.0
+presidio-analyzer>=2.2.355

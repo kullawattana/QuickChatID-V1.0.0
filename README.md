@@ -18,7 +18,7 @@ QuickChat ID is a **chat-based electronic Know Your Customer (eKYC)** system tha
 - **Scam Intent Detection** - Detect fraud patterns in Thai text
 - **Trust Badge System** - Tiered trust levels (Bronze / Silver / Gold / Platinum)
 - **Enterprise Security** - OPA, Presidio, Guardrails, Keycloak, Telemetry
-- **Multi-Channel** - LINE Bot + Web UI with same AI agent
+- **Multi-Channel** - LINE Bot + Facebook Messenger + Web UI with same AI agent
 - **PDPA Compliant** - PII masking and data protection
 
 ---
@@ -401,7 +401,7 @@ npm run dev
 
 Open **http://localhost:5173** in your browser.
 
-### Option B: LINE Bot
+### Option B: LINE Bot / Facebook Messenger
 
 Open **2 terminals**:
 
@@ -411,7 +411,7 @@ cd agents
 adk web
 # Running on http://localhost:8000
 
-# Terminal 2 - LINE Webhook Server
+# Terminal 2 - LINE + Messenger Webhook Server
 python line_webhook_app.py
 # Running on http://localhost:5001
 ```
@@ -420,9 +420,20 @@ For LINE Bot, you also need **ngrok** for public URL:
 
 ```bash
 ngrok http 5001
-# Copy the https URL and set in LINE Developer Console as Webhook URL
-# Example: https://xxxx.ngrok-free.dev/webhook-test/line-bot
+# LINE Developer Console → Webhook URL:
+#   https://xxxx.ngrok-free.dev/webhook-test/line-bot
+#
+# Facebook Developer Console → Messenger Webhook URL:
+#   https://xxxx.ngrok-free.dev/webhook/messenger
 ```
+
+**Platform Detection** — `platform` field ถูก set อัตโนมัติจาก user_id:
+
+| Pattern | Platform |
+|---------|----------|
+| `U` + 32 chars (e.g. `Uabc123...`) | `line` |
+| Numeric string (e.g. `9340707359288035`) | `messenger` |
+| `WEB_` prefix | `web` |
 
 ### Option C: Admin Dashboard
 
@@ -451,15 +462,17 @@ python dashboard_app.py
 | Service | Port | URL |
 |---------|------|-----|
 | ADK Agent (Gemini) | 8000 | http://localhost:8000 |
-| Flask Backend API | 5001 | http://localhost:5001 |
+| Flask Web API | 5003 | http://localhost:5003 |
+| LINE / Messenger Webhook | 5001 | http://localhost:5001 |
 | React Frontend | 5173 | http://localhost:5173 |
 | Admin Dashboard | 5002 | http://localhost:5002 |
+| Swagger UI | 5003 | http://localhost:5003/docs |
 
 ---
 
 ## API Endpoints
 
-### Web API (`web_api_app.py`)
+### Web API (`web_api_app.py`) — port 5003
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -468,8 +481,29 @@ python dashboard_app.py
 | `POST` | `/api/chat/message` | Send text message to agent |
 | `POST` | `/api/chat/image` | Upload ID card or selfie image |
 | `GET` | `/api/verification/status/<session_id>` | Get verification status |
+| `GET` | `/docs` | Swagger UI (API documentation) |
+| `GET` | `/swagger.json` | OpenAPI 3.0 spec |
 
-### Dashboard API (`dashboard_app.py`)
+### E-Commerce API (requires `X-API-Key` header)
+
+| Method | Endpoint | Query Params | Description |
+|--------|----------|-------------|-------------|
+| `GET` | `/api/v1/kyc/verify` | `user_id` | ดึง KYC Certificate ของ user |
+| `GET` | `/api/v1/kyc/users` | `role`, `platform`, `limit` | List ผู้ใช้ที่ผ่าน KYC |
+| `GET` | `/api/v1/kyc/stats` | — | สถิติ KYC รวม |
+| `POST` | `/api/v1/kyc/webhook/register` | — | ลงทะเบียน Webhook callback |
+| `POST` | `/api/v1/kyc/webhook/test` | — | ทดสอบ Webhook |
+
+**Platform filter ตัวอย่าง:**
+```bash
+# เฉพาะ Messenger users
+GET /api/v1/kyc/users?platform=messenger
+
+# Seller บน LINE เท่านั้น
+GET /api/v1/kyc/users?platform=line&role=seller
+```
+
+### Dashboard API (`dashboard_app.py`) — port 5002
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -480,12 +514,13 @@ python dashboard_app.py
 | `GET` | `/api/search/name?name=<name>` | Search by name |
 | `DELETE` | `/api/verifications/<id>` | Delete record |
 
-### LINE Webhook (`line_webhook_app.py`)
+### LINE / Messenger Webhook (`line_webhook_app.py`) — port 5001
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/webhook/line` | LINE webhook (default) |
-| `POST` | `/webhook-test/line-bot` | LINE webhook (alternative) |
+| `POST` | `/webhook/line` | LINE webhook |
+| `POST` | `/webhook-test/line-bot` | LINE webhook (ngrok testing) |
+| `POST` | `/webhook/messenger` | Facebook Messenger webhook |
 | `GET` | `/health` | Health check |
 
 ---
@@ -523,6 +558,7 @@ python dashboard_app.py
 | Styling | Tailwind CSS | UI components |
 | Database | SQLAlchemy + SQLite | KYC record storage |
 | LINE Bot | LINE Bot SDK v3 | Messaging integration |
+| Facebook Messenger | Messenger Platform API | Messaging integration |
 | Containers | Docker Compose | Enterprise services |
 
 ---
@@ -599,6 +635,9 @@ docker-compose up -d
 | `rekognition_data` | JSON | AWS Rekognition raw response |
 | `status` | String | pending / approved / rejected / failed |
 | `is_verified` | Boolean | Verification passed |
+| `role` | String | buyer / seller / null |
+| `platform` | String | line / messenger / web (auto-detected from user_id) |
+| `notes` | Text | trust_level, risk_score, source metadata |
 | `created_at` | DateTime | Record creation (Bangkok UTC+7) |
 | `verified_at` | DateTime | Verification timestamp |
 

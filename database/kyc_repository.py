@@ -91,7 +91,9 @@ class KYCRepository:
     def get_all_records(
         limit: int = 100,
         offset: int = 0,
-        status: Optional[str] = None
+        status: Optional[str] = None,
+        role: Optional[str] = None,
+        platform: Optional[str] = None
     ) -> List[KYCVerification]:
         """Get all KYC records with pagination"""
         db = SessionLocal()
@@ -100,11 +102,28 @@ class KYCRepository:
 
             if status:
                 query = query.filter(KYCVerification.status == status)
+            if role:
+                query = query.filter(KYCVerification.role == role)
+            if platform:
+                query = query.filter(KYCVerification.platform == platform)
 
             return query.order_by(desc(KYCVerification.created_at))\
                 .limit(limit)\
                 .offset(offset)\
                 .all()
+        finally:
+            db.close()
+
+    @staticmethod
+    def get_approved_by_user_id(user_id: str) -> Optional[KYCVerification]:
+        """Get most recent approved KYC record for user"""
+        db = SessionLocal()
+        try:
+            return db.query(KYCVerification)\
+                .filter(KYCVerification.user_id == user_id,
+                        KYCVerification.status == 'approved')\
+                .order_by(desc(KYCVerification.created_at))\
+                .first()
         finally:
             db.close()
 

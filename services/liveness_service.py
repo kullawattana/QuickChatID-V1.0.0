@@ -12,6 +12,7 @@ References:
 - https://sefiks.com/2024/06/08/face-anti-spoofing-for-facial-recognition-in-python/
 """
 
+import os
 import cv2
 import numpy as np
 from typing import Dict, Optional, List
@@ -154,7 +155,7 @@ class LivenessDetectionService:
             edge_density = np.sum(edges > 0) / edges.size
 
             # Scoring
-            liveness_score = 0.6  # Start slightly positive (benefit of the doubt for real photos)
+            liveness_score = float(os.getenv('LIVENESS_INITIAL_SCORE', '0.6'))  # benefit of the doubt
 
             # Real faces: moderate high-freq energy, high color variance, some reflections
             if high_freq_energy < 1e10:  # No strong Moiré
@@ -184,11 +185,13 @@ class LivenessDetectionService:
             # Clamp to [0, 1]
             liveness_score = max(0.0, min(1.0, liveness_score))
 
-            is_live = liveness_score > 0.5
+            _pass = float(os.getenv('LIVENESS_PASS_THRESHOLD', '0.5'))
+            _high = float(os.getenv('LIVENESS_HIGH_CONFIDENCE', '0.8'))
+            is_live = liveness_score > _pass
 
-            if liveness_score > 0.8:
+            if liveness_score > _high:
                 confidence = 'high'
-            elif liveness_score > 0.5:
+            elif liveness_score > _pass:
                 confidence = 'medium'
             else:
                 confidence = 'low'
